@@ -321,6 +321,34 @@ if (isset($_GET['ajax_tarik_tugas'])) {
     exit;
 }
 
+// ==== Endpoint AJAX: tarik nilai UTS/UAS dari Ujian Online ====
+// Syarat data yang ditarik: ujian berstatus Terbit, peserta berstatus Selesai,
+// dan sudah dinilai (dinilai = 1, artinya essay sudah dikoreksi guru).
+// Jika ada lebih dari satu ujian dengan jenis yang sama, nilainya dirata-rata.
+if (isset($_GET['ajax_tarik_ujian'])) {
+    header('Content-Type: application/json');
+    $hasil = [];
+    if ($kelas_id && $mapel_id) {
+        $stmt = $pdo->prepare("
+            SELECT up.siswa_id, u.jenis, ROUND(AVG(up.nilai_akhir),1) nilai, COUNT(*) jumlah
+            FROM ujian_peserta up
+            JOIN ujian u ON up.ujian_id = u.id
+            WHERE u.kelas_id = ? AND u.mapel_id = ? AND u.semester = ? AND u.tahun_ajaran = ?
+              AND u.status = 'Terbit' AND up.status = 'Selesai' AND up.dinilai = 1
+            GROUP BY up.siswa_id, u.jenis
+        ");
+        $stmt->execute([$kelas_id, $mapel_id, $semester, $tahun_ajaran]);
+        foreach ($stmt->fetchAll() as $row) {
+            $hasil[$row['siswa_id']][strtolower($row['jenis'])] = [
+                'nilai'  => (float)$row['nilai'],
+                'jumlah' => (int)$row['jumlah'],
+            ];
+        }
+    }
+    echo json_encode(['ok' => true, 'data' => $hasil]);
+    exit;
+}
+
 // ==== Endpoint AJAX: ambil daftar nilai tugas kertas yang tersimpan untuk
 // seorang siswa (dipanggil saat modal kalkulator dibuka, supaya angka yang
 // pernah diinput sebelumnya muncul lagi, tidak kosong) ====
@@ -408,9 +436,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         exit;
     }
 
-    // ==== Auto-simpan satu nilai siswa (dipanggil via AJAX dari kalkulator
-    // atau tarik-ulang E-Learning, supaya nilai langsung tersimpan ke database
-    // begitu diterapkan — guru tidak perlu ingat klik "Simpan Nilai" lagi). ====
+    // ==== Auto-simpan satu nilai siswa (dipanggil via AJAX dari kalkulator,
+    // tarik-ulang E-Learning, atau tarik UTS/UAS dari Ujian, supaya nilai
+    // langsung tersimpan ke database begitu diterapkan — guru tidak perlu
+    // ingat klik "Simpan Nilai" lagi). ====
     if (isset($_POST['ajax_simpan_satu'])) {
         header('Content-Type: application/json');
         $siswa_id_satu = (int)($_POST['siswa_id'] ?? 0);
@@ -494,6 +523,23 @@ if ($kelas_id && $mapel_id) {
     }
 }
 
+// ==== Ambil nilai UTS/UAS dari Ujian Online per siswa (kelas + mapel + semester + tahun ajaran) ====
+$ujianOtomatis = [];
+if ($kelas_id && $mapel_id) {
+    $stmt = $pdo->prepare("
+        SELECT up.siswa_id, u.jenis, ROUND(AVG(up.nilai_akhir),1) nilai, COUNT(*) jumlah
+        FROM ujian_peserta up
+        JOIN ujian u ON up.ujian_id = u.id
+        WHERE u.kelas_id = ? AND u.mapel_id = ? AND u.semester = ? AND u.tahun_ajaran = ?
+          AND u.status = 'Terbit' AND up.status = 'Selesai' AND up.dinilai = 1
+        GROUP BY up.siswa_id, u.jenis
+    ");
+    $stmt->execute([$kelas_id, $mapel_id, $semester, $tahun_ajaran]);
+    foreach ($stmt->fetchAll() as $row) {
+        $ujianOtomatis[$row['siswa_id']][strtolower($row['jenis'])] = $row;
+    }
+}
+
 include __DIR__ . '/../includes/header.php';
 styleResponsifNilai();
 ?>
@@ -561,7 +607,14 @@ styleResponsifNilai();
 #toastTarik .msg-title { font-weight:700; font-size:.85rem; }
 #toastTarik .msg-sub { font-size:.78rem; color:#6c757d; }
 
-.mode-badge { transition: opacity .25s ease, transform .25s ease; }
+.btn-tarik {
+  display: inline-flex; align-items: center; justify-content: center;
+  gap: 6px; white-space: nowrap; min-width: 250px;
+}
+@media (max-width: 767.98px) {
+  .tarik-actions { width: 100%; }
+  .tarik-actions .btn-tarik { min-width: 0; width: 100%; }
+}
 </style>
 
 <div id="toastTarik"></div>
@@ -570,11 +623,15 @@ styleResponsifNilai();
   <div class="d-flex justify-content-between align-items-start flex-wrap gap-2 mb-2">
     <div class="alert alert-light border small mb-0">
       Nilai Akhir dihitung otomatis: Tugas 30% + UTS 30% + UAS 40%.<br>
-      Kolom <strong>Tugas</strong> otomatis terisi dari rata-rata nilai tugas E-Learning yang semester &amp; tahun ajarannya sama persis, jika belum pernah diisi manual.
+      Kolom <strong>Tugas</strong> otomatis terisi dari rata-rata nilai tugas E-Learning yang semester &amp; tahun ajarannya sama persis, jika belum pernah diisi manual.<br>
+      Kolom <strong>UTS</strong> &amp; <strong>UAS</strong> bisa ditarik dari <strong>Ujian Online</strong> (ujian berstatus Terbit dan sudah selesai dikoreksi).
     </div>
-    <div class="text-nowrap text-end" id="tarikControlArea">
-      <button type="button" id="btnTarikTugas" class="btn btn-sm btn-outline-secondary">
-        <i class="bi bi-arrow-repeat"></i> Tarik Ulang dari E-Learning
+    <div class="d-flex flex-column gap-2 tarik-actions">
+      <button type="button" id="btnTarikTugas" class="btn btn-sm btn-outline-secondary btn-tarik">
+        <i class="bi bi-laptop"></i> Tarik Tugas dari E-Learning
+      </button>
+      <button type="button" id="btnTarikUjian" class="btn btn-sm btn-outline-secondary btn-tarik">
+        <i class="bi bi-file-earmark-check"></i> Tarik UTS/UAS dari Ujian
       </button>
     </div>
   </div>
@@ -598,7 +655,16 @@ styleResponsifNilai();
               $otomatis = $tugasOtomatis[$s['id']] ?? null;
               $pakaiOtomatis = $otomatis && $s['nilai_tugas'] === null;
               $nilaiTugasTampil = $pakaiOtomatis ? $otomatis['rata'] : $s['nilai_tugas'];
-              $previewAwal = round((($nilaiTugasTampil ?? 0) * 0.3) + (($s['nilai_uts'] ?? 0) * 0.3) + (($s['nilai_uas'] ?? 0) * 0.4), 1);
+
+              // UTS/UAS dari Ujian Online: dipakai sebagai tampilan awal jika
+              // nilai tersimpan masih kosong / 0 (default kolom database 0.00).
+              $uj = $ujianOtomatis[$s['id']] ?? [];
+              $pakaiUts = isset($uj['uts']) && ($s['nilai_uts'] === null || (float)$s['nilai_uts'] == 0);
+              $pakaiUas = isset($uj['uas']) && ($s['nilai_uas'] === null || (float)$s['nilai_uas'] == 0);
+              $utsTampil = $pakaiUts ? $uj['uts']['nilai'] : $s['nilai_uts'];
+              $uasTampil = $pakaiUas ? $uj['uas']['nilai'] : $s['nilai_uas'];
+
+              $previewAwal = round((($nilaiTugasTampil ?? 0) * 0.3) + (($utsTampil ?? 0) * 0.3) + (($uasTampil ?? 0) * 0.4), 1);
           ?>
           <tr data-siswa-row="<?= $s['id'] ?>">
             <td data-label="#"><?= $i + 1 ?></td>
@@ -620,8 +686,18 @@ styleResponsifNilai();
                 <?php endif; ?>
               </div>
             </td>
-            <td data-label="UTS"><input type="number" step="0.1" min="0" max="100" name="uts[<?= $s['id'] ?>]" class="form-control form-control-sm td-uts-input" data-siswa-id="<?= $s['id'] ?>" value="<?= $s['nilai_uts'] ?? '' ?>" style="width:90px;"></td>
-            <td data-label="UAS"><input type="number" step="0.1" min="0" max="100" name="uas[<?= $s['id'] ?>]" class="form-control form-control-sm td-uas-input" data-siswa-id="<?= $s['id'] ?>" value="<?= $s['nilai_uas'] ?? '' ?>" style="width:90px;"></td>
+            <td data-label="UTS">
+              <input type="number" step="0.1" min="0" max="100" name="uts[<?= $s['id'] ?>]" class="form-control form-control-sm td-uts-input" data-siswa-id="<?= $s['id'] ?>" value="<?= $utsTampil ?? '' ?>" style="width:90px;">
+              <?php if (isset($uj['uts'])): ?>
+                <div class="small <?= $pakaiUts ? 'text-success' : 'text-muted' ?>"><?= $pakaiUts ? 'otomatis dari ujian' : 'ujian: ' . number_format($uj['uts']['nilai'], 1) ?></div>
+              <?php endif; ?>
+            </td>
+            <td data-label="UAS">
+              <input type="number" step="0.1" min="0" max="100" name="uas[<?= $s['id'] ?>]" class="form-control form-control-sm td-uas-input" data-siswa-id="<?= $s['id'] ?>" value="<?= $uasTampil ?? '' ?>" style="width:90px;">
+              <?php if (isset($uj['uas'])): ?>
+                <div class="small <?= $pakaiUas ? 'text-success' : 'text-muted' ?>"><?= $pakaiUas ? 'otomatis dari ujian' : 'ujian: ' . number_format($uj['uas']['nilai'], 1) ?></div>
+              <?php endif; ?>
+            </td>
             <td data-label="Preview Akhir" class="text-center">
               <span class="badge bg-light text-dark border preview-akhir" id="preview-<?= $s['id'] ?>"><?= number_format($previewAwal,1) ?></span>
             </td>
@@ -676,11 +752,8 @@ styleResponsifNilai();
 <script>
 (function () {
   const btn = document.getElementById('btnTarikTugas');
-  const controlArea = document.getElementById('tarikControlArea');
   const toast = document.getElementById('toastTarik');
   if (!btn) return;
-
-  let modeOtomatis = false;
 
   function showToast(title, sub, isError) {
     toast.innerHTML =
@@ -707,44 +780,10 @@ styleResponsifNilai();
     requestAnimationFrame(step);
   }
 
-  function renderModeBadge() {
-    if (modeOtomatis) {
-      controlArea.innerHTML =
-        '<span class="badge bg-success mb-1 d-block text-end mode-badge"><i class="bi bi-check-circle"></i> Data Telah Di Konfigurasikan</span>' +
-        '<button type="button" id="btnMatikanTarik" class="btn btn-sm btn-outline-secondary"><i class="bi bi-x-lg"></i> Matikan, pakai nilai manual</button>';
-      document.getElementById('btnMatikanTarik').addEventListener('click', matikanOtomatis);
-    } else {
-      controlArea.innerHTML =
-        '<button type="button" id="btnTarikTugas" class="btn btn-sm btn-outline-secondary"><i class="bi bi-arrow-repeat"></i> Tarik Ulang dari E-Learning</button>';
-      document.getElementById('btnTarikTugas').addEventListener('click', tarikOtomatis);
-    }
-  }
-
-  function matikanOtomatis() {
-    modeOtomatis = false;
-    document.querySelectorAll('.td-tugas-input').forEach(function (input) {
-      const manual = input.dataset.manual;
-      const from = parseFloat(input.value) || 0;
-      const to = manual !== '' ? parseFloat(manual) : 0;
-      animateCount(input, from, to, 400);
-      const hint = document.querySelector('[data-hint-for="' + input.dataset.siswaId + '"]');
-      if (hint) {
-        hint.classList.add('updating');
-        setTimeout(function () {
-          hint.className = 'small tugas-hint text-muted';
-          hint.textContent = hint.dataset.tersedia || '';
-        }, 250);
-      }
-    });
-    renderModeBadge();
-    showToast('Kembali ke nilai manual', 'Nilai Tugas dikembalikan ke data tersimpan.', false);
-  }
-
   function tarikOtomatis() {
-    const original = document.getElementById('btnTarikTugas');
-    if (!original) return;
-    original.disabled = true;
-    original.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Menarik nilai...';
+    const labelAwal = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Menarik nilai...';
 
     const params = new URLSearchParams({
       ajax_tarik_tugas: 1,
@@ -781,53 +820,55 @@ styleResponsifNilai();
           const sid = input.dataset.siswaId;
           const info = data[sid];
           const hint = document.querySelector('[data-hint-for="' + sid + '"]');
-          if (info) {
-            jumlahSiswaTerpengaruh++;
-            const from = parseFloat(input.value) || 0;
-            animateCount(input, from, info.rata, 550);
-            input.classList.remove('tugas-glow');
-            void input.offsetWidth; // restart animasi
-            input.classList.add('tugas-glow');
+          if (!info) return;
 
-            if (hint) {
-              hint.dataset.tersedia = 'tersedia: ' + info.jumlah + ' tugas';
-              hint.classList.add('updating');
-              setTimeout(function () {
-                hint.className = 'small tugas-hint text-success';
-                hint.textContent = 'otomatis dari ' + info.jumlah + ' tugas';
-                hint.classList.remove('updating');
-              }, 220);
-            }
+          jumlahSiswaTerpengaruh++;
+          const from = parseFloat(input.value) || 0;
+          animateCount(input, from, info.rata, 550);
+          input.classList.remove('tugas-glow');
+          void input.offsetWidth; // restart animasi
+          input.classList.add('tugas-glow');
 
-            promiseSimpan.push(simpanSatuNilai(sid, info.rata).then(function (r) {
-              if (r.ok) tandaiTersimpan(sid);
-              return r.ok;
-            }).catch(function () { return false; }));
+          if (hint) {
+            hint.classList.add('updating');
+            setTimeout(function () {
+              hint.className = 'small tugas-hint text-success';
+              hint.textContent = 'otomatis dari ' + info.jumlah + ' tugas';
+              hint.classList.remove('updating');
+            }, 220);
           }
+
+          promiseSimpan.push(
+            simpanSatuNilai(sid, info.rata)
+              .then(function (r) {
+                if (r.ok) tandaiTersimpan(sid);
+                return r.ok;
+              })
+              .catch(function () { return false; })
+          );
         });
 
-        modeOtomatis = true;
-        renderModeBadge();
+        btn.disabled = false;
+        btn.innerHTML = labelAwal;
 
-        if (jumlahSiswaTerpengaruh > 0) {
-          Promise.all(promiseSimpan).then(function (hasilArr) {
-            const jumlahSukses = hasilArr.filter(Boolean).length;
-            if (jumlahSukses === jumlahSiswaTerpengaruh) {
-              showToast('Berhasil ditarik & tersimpan!', jumlahSiswaTerpengaruh + ' siswa punya nilai tugas dari E-Learning, langsung tersimpan ke database.', false);
-            } else {
-              showToast('Ditarik, sebagian gagal tersimpan', jumlahSukses + ' dari ' + jumlahSiswaTerpengaruh + ' tersimpan. Klik "Simpan Nilai" untuk sisanya.', true);
-            }
-          });
-        } else {
+        if (jumlahSiswaTerpengaruh === 0) {
           showToast('Tidak ada data', 'Belum ada tugas dinilai untuk kelas/mapel/semester ini.', true);
-          original.disabled = false;
-          original.innerHTML = '<i class="bi bi-arrow-repeat"></i> Tarik Ulang dari E-Learning';
+          return;
         }
+
+        Promise.all(promiseSimpan).then(function (hasilArr) {
+          const jumlahSukses = hasilArr.filter(Boolean).length;
+          if (jumlahSukses === jumlahSiswaTerpengaruh) {
+            showToast('Tugas berhasil ditarik!', jumlahSiswaTerpengaruh + ' siswa, langsung tersimpan ke database.', false);
+          } else {
+            showToast('Ditarik, sebagian gagal tersimpan', jumlahSukses + ' dari ' + jumlahSiswaTerpengaruh + ' tersimpan. Klik "Simpan Nilai" untuk sisanya.', true);
+          }
+        });
       })
       .catch(function (err) {
-        console.error('Tarik Ulang dari E-Learning gagal:', err);
-        original.disabled = false;
-        original.innerHTML = '<i class="bi bi-arrow-repeat"></i> Tarik Ulang dari E-Learning';
+        console.error('Tarik Tugas dari E-Learning gagal:', err);
+        btn.disabled = false;
+        btn.innerHTML = labelAwal;
         showToast('Gagal menarik data', err.message || 'Terjadi kesalahan, coba lagi.', true);
       });
   }
@@ -1048,6 +1089,112 @@ styleResponsifNilai();
           btnTerapkanKalk.disabled = false;
           btnTerapkanKalk.innerHTML = '<i class="bi bi-check-lg"></i> Terapkan ke Kolom Tugas';
           showToast('Gagal menyimpan', err.message || 'Terjadi kesalahan, coba lagi.', true);
+        });
+    });
+  }
+
+  // ==== Tarik UTS/UAS dari Ujian Online ====
+  function simpanNilaiLengkap(siswaId, tugas, uts, uas) {
+    const body = new URLSearchParams({
+      ajax_simpan_satu: 1,
+      siswa_id: siswaId,
+      tugas: tugas,
+      uts: uts,
+      uas: uas
+    });
+    return fetch(window.location.pathname + window.location.search, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Requested-With': 'XMLHttpRequest' },
+      body: body.toString()
+    }).then(function (r) { return r.json(); });
+  }
+
+  const btnUjian = document.getElementById('btnTarikUjian');
+  if (btnUjian) {
+    const labelAwalUjian = btnUjian.innerHTML;
+    btnUjian.addEventListener('click', function () {
+      btnUjian.disabled = true;
+      btnUjian.innerHTML = '<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Menarik nilai...';
+
+      const params = new URLSearchParams({
+        ajax_tarik_ujian: 1,
+        kelas_id: <?= json_encode($kelas_id) ?>,
+        mapel_id: <?= json_encode($mapel_id) ?>,
+        semester: <?= json_encode($semester) ?>,
+        tahun_ajaran: <?= json_encode($tahun_ajaran) ?>
+      });
+
+      fetch(window.location.pathname + '?' + params.toString(), { headers: { 'X-Requested-With': 'XMLHttpRequest' } })
+        .then(function (r) {
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          return r.text();
+        })
+        .then(function (text) {
+          let res;
+          try {
+            res = JSON.parse(text);
+          } catch (e) {
+            console.error('Respons bukan JSON valid:', text);
+            throw new Error('Respons server tidak valid (bukan JSON). Cek console (F12) untuk detail.');
+          }
+          if (!res.ok) throw new Error(res.pesan || 'Gagal mengambil data');
+
+          let terpengaruh = 0;
+          const saves = [];
+
+          document.querySelectorAll('.td-tugas-input').forEach(function (tugasInput) {
+            const sid = tugasInput.dataset.siswaId;
+            const info = res.data[sid];
+            if (!info || (!info.uts && !info.uas)) return;
+
+            const utsInput = document.querySelector('.td-uts-input[data-siswa-id="' + sid + '"]');
+            const uasInput = document.querySelector('.td-uas-input[data-siswa-id="' + sid + '"]');
+            let uts = parseFloat(utsInput.value) || 0;
+            let uas = parseFloat(uasInput.value) || 0;
+
+            [[info.uts, utsInput], [info.uas, uasInput]].forEach(function (pasangan) {
+              if (!pasangan[0]) return;
+              animateCount(pasangan[1], parseFloat(pasangan[1].value) || 0, pasangan[0].nilai, 500);
+              pasangan[1].classList.remove('tugas-glow');
+              void pasangan[1].offsetWidth; // restart animasi
+              pasangan[1].classList.add('tugas-glow');
+            });
+            if (info.uts) uts = info.uts.nilai;
+            if (info.uas) uas = info.uas.nilai;
+
+            terpengaruh++;
+            saves.push(
+              simpanNilaiLengkap(sid, parseFloat(tugasInput.value) || 0, uts, uas)
+                .then(function (r) {
+                  if (r.ok) tandaiTersimpan(sid);
+                  return r.ok;
+                })
+                .catch(function () { return false; })
+            );
+          });
+
+          btnUjian.disabled = false;
+          btnUjian.innerHTML = labelAwalUjian;
+
+          if (terpengaruh === 0) {
+            showToast('Tidak ada data', 'Belum ada ujian terbit yang sudah dinilai untuk kelas/mapel/semester ini.', true);
+            return;
+          }
+
+          Promise.all(saves).then(function (hasilArr) {
+            const sukses = hasilArr.filter(Boolean).length;
+            if (sukses === terpengaruh) {
+              showToast('UTS/UAS berhasil ditarik!', terpengaruh + ' siswa, langsung tersimpan ke database.', false);
+            } else {
+              showToast('Ditarik, sebagian gagal tersimpan', sukses + ' dari ' + terpengaruh + ' tersimpan. Klik "Simpan Nilai" untuk sisanya.', true);
+            }
+          });
+        })
+        .catch(function (err) {
+          console.error('Tarik UTS/UAS dari Ujian gagal:', err);
+          btnUjian.disabled = false;
+          btnUjian.innerHTML = labelAwalUjian;
+          showToast('Gagal menarik data', err.message || 'Terjadi kesalahan, coba lagi.', true);
         });
     });
   }

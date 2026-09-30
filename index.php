@@ -154,6 +154,169 @@ if ($sudahMasuk && $user['role'] === 'siswa' && $user['siswa_id']) {
 // ==== Pengumuman terbaru ====
 $pengumuman = $pdo->query("SELECT * FROM pengumuman ORDER BY tanggal DESC, id DESC LIMIT 4")->fetchAll();
 
+/* =========================================================
+   KALENDER KEHADIRAN & HARI LIBUR
+   - Siswa  : status harian milik sendiri (Hadir/Izin/Sakit/Alpa, jam masuk & pulang)
+   - Admin/Guru/Wali Kelas : jumlah siswa per status tiap hari
+     (wali kelas otomatis dibatasi ke kelasnya)
+   - Semua : hari libur dari tabel hari_libur + Sabtu/Minggu
+   Bulan dipilih lewat ?bulan=YYYY-MM (default: bulan berjalan).
+   ========================================================= */
+$namaBulanIndo = [1=>'Januari','Februari','Maret','April','Mei','Juni','Juli','Agustus','September','Oktober','November','Desember'];
+$namaHariIndo  = [1=>'Senin','Selasa','Rabu','Kamis','Jumat','Sabtu','Minggu'];
+
+$bulanParam = $_GET['bulan'] ?? date('Y-m');
+if (!preg_match('/^(\d{4})-(0[1-9]|1[0-2])$/', $bulanParam, $mBulan) || (int)$mBulan[1] < 2000 || (int)$mBulan[1] > 2100) {
+    $bulanParam = date('Y-m');
+}
+$awalBulan    = $bulanParam . '-01';
+$akhirBulan   = date('Y-m-t', strtotime($awalBulan));
+$jumlahHari   = (int)date('t', strtotime($awalBulan));
+$offsetAwal   = (int)date('N', strtotime($awalBulan)) - 1; // Senin = 0
+$bulanSebelum = date('Y-m', strtotime($awalBulan . ' -1 month'));
+$bulanBerikut = date('Y-m', strtotime($awalBulan . ' +1 month'));
+$judulBulan   = $namaBulanIndo[(int)date('n', strtotime($awalBulan))] . ' ' . date('Y', strtotime($awalBulan));
+$adalahBulanIni = ($bulanParam === date('Y-m'));
+
+$isSiswaKal = ($user['role'] === 'siswa' && !empty($user['siswa_id']));
+
+// Hari libur (tanggal merah yang diinput admin)
+$kalLibur = [];
+$stmt = $pdo->prepare("SELECT tanggal, keterangan, jenis FROM hari_libur WHERE tanggal BETWEEN ? AND ? ORDER BY tanggal");
+$stmt->execute([$awalBulan, $akhirBulan]);
+foreach ($stmt->fetchAll() as $r) { $kalLibur[$r['tanggal']] = $r; }
+
+$kalAbsen = [];      // siswa: tanggal => baris absensi
+$kalJamMasuk = [];   // siswa: tanggal => jam masuk (dari log GPS)
+$kalRekap = [];      // staff: tanggal => [status => jumlah]
+
+if ($isSiswaKal) {
+    $stmt = $pdo->prepare("SELECT * FROM absensi WHERE siswa_id = ? AND tanggal BETWEEN ? AND ?");
+    $stmt->execute([$user['siswa_id'], $awalBulan, $akhirBulan]);
+    foreach ($stmt->fetchAll() as $r) { $kalAbsen[$r['tanggal']] = $r; }
+
+    try {
+        $stmt = $pdo->prepare("SELECT tanggal, MIN(waktu) w FROM absensi_gps WHERE siswa_id = ? AND tanggal BETWEEN ? AND ? AND tipe = 'Masuk' AND status = 'Berhasil' GROUP BY tanggal");
+        $stmt->execute([$user['siswa_id'], $awalBulan, $akhirBulan]);
+        foreach ($stmt->fetchAll() as $r) { $kalJamMasuk[$r['tanggal']] = $r['w']; }
+    } catch (PDOException $e) {
+        // kolom "tipe" belum ada -> jam masuk tidak ditampilkan, kalender tetap jalan
+    }
+} elseif (in_array($user['role'], ['admin','guru','wali_kelas'])) {
+    if ($kelasSaya) {
+        $stmt = $pdo->prepare("SELECT tanggal, status, COUNT(*) c FROM absensi WHERE tanggal BETWEEN ? AND ? AND kelas_id = ? GROUP BY tanggal, status");
+        $stmt->execute([$awalBulan, $akhirBulan, $kelasSaya['id']]);
+    } else {
+        $stmt = $pdo->prepare("SELECT tanggal, status, COUNT(*) c FROM absensi WHERE tanggal BETWEEN ? AND ? GROUP BY tanggal, status");
+        $stmt->execute([$awalBulan, $akhirBulan]);
+    }
+    foreach ($stmt->fetchAll() as $r) { $kalRekap[$r['tanggal']][$r['status']] = (int)$r['c']; }
+}
+
+// Susun data tiap tanggal (dipakai untuk render sel & panel detail)
+$kalHari = [];
+$kalDetail = [];
+$ringkasBulan = ['Hadir'=>0,'Izin'=>0,'Sakit'=>0,'Alpa'=>0];
+$jumlahLiburBulan = count($kalLibur);
+
+for ($d = 1; $d <= $jumlahHari; $d++) {
+    $tgl = sprintf('%s-%02d', $bulanParam, $d);
+    $n = (int)date('N', strtotime($tgl));
+    $libur = $kalLibur[$tgl] ?? null;
+    $akhirPekan = ($n >= 6);
+    $lampau = ($tgl < $hariIni);
+
+    $cell = ['tgl'=>$tgl, 'd'=>$d, 'kls'=>'kosong', 'tag'=>'', 'sub'=>'', 'mini'=>[], 'minggu'=>($n === 7)];
+    $det  = [
+        'judul'  => $namaHariIndo[$n] . ', ' . $d . ' ' . $namaBulanIndo[(int)date('n', strtotime($tgl))] . ' ' . date('Y', strtotime($tgl)),
+        'status' => '',
+        'kls'    => '',
+        'baris'  => [],
+    ];
+
+    if ($isSiswaKal) {
+        $rec = $kalAbsen[$tgl] ?? null;
+        if ($rec) {
+            $st = $rec['status'];
+            if (isset($ringkasBulan[$st])) { $ringkasBulan[$st]++; }
+            $cell['kls'] = strtolower($st);
+            $cell['tag'] = $st;
+            $det['status'] = $st;
+            $det['kls'] = strtolower($st);
+
+            if ($st === 'Hadir') {
+                $jm = !empty($kalJamMasuk[$tgl]) ? substr($kalJamMasuk[$tgl], 0, 5) : null;
+                $jp = !empty($rec['jam_pulang']) ? substr($rec['jam_pulang'], 0, 5) : null;
+                $cell['sub'] = trim(($jm ?: '') . ($jp ? ' – ' . $jp : ''));
+                $det['baris'][] = 'Masuk: ' . ($jm ?: 'tercatat hadir (jam tidak tersedia)');
+                if ($jp) {
+                    $det['baris'][] = 'Pulang: ' . $jp;
+                } else {
+                    $det['baris'][] = 'Pulang: ' . ($tgl === $hariIni ? 'belum presensi pulang' : 'tidak tercatat');
+                }
+            }
+            if (!empty($rec['keterangan'])) { $det['baris'][] = 'Keterangan: ' . $rec['keterangan']; }
+            if ($libur) { $det['baris'][] = 'Catatan: tanggal ini ditandai libur (' . $libur['keterangan'] . ')'; }
+        } elseif ($libur) {
+            $cell['kls'] = 'libur';
+            $cell['tag'] = 'Libur';
+            $cell['sub'] = $libur['keterangan'];
+            $det['status'] = 'Libur';
+            $det['kls'] = 'libur';
+            $det['baris'][] = $libur['keterangan'] . ' (' . $libur['jenis'] . ')';
+        } elseif ($akhirPekan) {
+            $cell['kls'] = 'weekend';
+            $det['status'] = 'Akhir pekan';
+            $det['kls'] = 'weekend';
+            $det['baris'][] = $namaHariIndo[$n] . ' — tidak ada kegiatan belajar.';
+        } elseif ($lampau) {
+            $cell['kls'] = 'tanpa';
+            $cell['tag'] = 'Kosong';
+            $det['status'] = 'Tidak ada presensi tercatat';
+            $det['kls'] = 'tanpa';
+            $det['baris'][] = 'Hari sekolah, tetapi tidak ada data presensi untuk tanggal ini.';
+        } else {
+            $det['status'] = ($tgl === $hariIni) ? 'Hari ini' : 'Belum berlangsung';
+            $det['baris'][] = ($tgl === $hariIni) ? 'Belum ada presensi tercatat hari ini.' : 'Belum ada data.';
+        }
+    } else {
+        $rk = $kalRekap[$tgl] ?? [];
+        $totalHari = 0;
+        foreach (['Hadir'=>'h','Izin'=>'i','Sakit'=>'s','Alpa'=>'a'] as $st => $kode) {
+            $jml = (int)($rk[$st] ?? 0);
+            if ($jml > 0) {
+                $cell['mini'][] = ['kode'=>$kode, 'jml'=>$jml, 'st'=>$st];
+                $ringkasBulan[$st] += $jml;
+                $totalHari += $jml;
+                $det['baris'][] = $st . ': ' . $jml . ' siswa';
+            }
+        }
+        if ($libur) {
+            $cell['kls'] = 'libur';
+            $cell['tag'] = 'Libur';
+            $cell['sub'] = $libur['keterangan'];
+            $det['status'] = 'Libur';
+            $det['kls'] = 'libur';
+            array_unshift($det['baris'], $libur['keterangan'] . ' (' . $libur['jenis'] . ')');
+        } elseif ($totalHari > 0) {
+            $cell['kls'] = 'ada';
+            $det['status'] = 'Rekap kehadiran';
+            $det['kls'] = 'ada';
+        } elseif ($akhirPekan) {
+            $cell['kls'] = 'weekend';
+            $det['status'] = 'Akhir pekan';
+            $det['kls'] = 'weekend';
+            $det['baris'][] = $namaHariIndo[$n] . ' — tidak ada kegiatan belajar.';
+        } else {
+            $det['status'] = $lampau ? 'Tidak ada data presensi' : (($tgl === $hariIni) ? 'Hari ini' : 'Belum berlangsung');
+            $det['baris'][] = $lampau ? 'Belum ada data presensi untuk tanggal ini.' : 'Belum ada data.';
+        }
+    }
+
+    $kalHari[] = $cell;
+    $kalDetail[$tgl] = $det;
+}
+
 // ==== Sapaan berdasar jam ====
 $jamNow = (int)date('H');
 if ($jamNow < 11)      { $sapaan = 'Selamat Pagi'; $sapaanIcon = 'bi-sunrise-fill'; }
@@ -307,6 +470,107 @@ body{ background:var(--bg); color:var(--ink); font-family:'Inter',system-ui,sans
 .gv-shortcut:hover{ transform:translateY(-3px); box-shadow:0 10px 24px -10px rgba(19,26,46,.2); border-color:var(--gold); color:var(--ink); }
 .gv-shortcut .icon{ width:42px; height:42px; border-radius:10px; background:var(--brand-soft); display:flex; align-items:center; justify-content:center; font-size:1.15rem; color:var(--navy); }
 .gv-shortcut .label{ font-size:.76rem; font-weight:700; line-height:1.2; }
+
+/* ---- Kalender kehadiran & hari libur ---- */
+#kalender{ scroll-margin-top:80px; }
+.kal-head{ display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; margin-bottom:14px; }
+.kal-head .kal-judul{ font-size:1.05rem; font-weight:800; color:var(--navy); display:flex; align-items:center; gap:8px; }
+.kal-nav{ display:flex; align-items:center; gap:6px; }
+.kal-nav a{ display:inline-flex; align-items:center; justify-content:center; height:34px; min-width:34px; padding:0 10px; border:1px solid var(--line); border-radius:8px; background:var(--surface); color:var(--ink); text-decoration:none; font-size:.78rem; font-weight:700; transition:background .15s ease, border-color .15s ease; }
+.kal-nav a:hover{ background:var(--brand-soft); border-color:var(--gold); color:var(--ink); }
+
+.kal-summary{ display:flex; gap:8px; flex-wrap:wrap; margin-bottom:14px; }
+.kal-sum{ display:inline-flex; align-items:center; gap:6px; font-size:.74rem; font-weight:700; padding:5px 11px; border-radius:6px; }
+.kal-sum b{ font-family:'Courier New',monospace; font-size:.9rem; }
+.kal-sum.hadir{ background:var(--good-soft); color:#0F5A2A; }
+.kal-sum.izin{ background:var(--warn-soft); color:#8A4A0B; }
+.kal-sum.sakit{ background:var(--info-soft); color:#1E3A6E; }
+.kal-sum.alpa{ background:var(--bad-soft); color:#8A1B1B; }
+.kal-sum.libur{ background:#FFF4DC; color:#8A5A00; }
+
+.kal-grid{ display:grid; grid-template-columns:repeat(7, minmax(0,1fr)); gap:6px; }
+.kal-dow div{ text-align:center; font-size:.66rem; font-weight:800; letter-spacing:.06em; text-transform:uppercase; color:var(--ink-soft); padding:4px 0; }
+.kal-dow div:nth-child(6){ color:#9CA3AF; }
+.kal-dow div:nth-child(7){ color:var(--bad); }
+
+.kal-cell{
+  display:flex; flex-direction:column; align-items:flex-start; justify-content:flex-start; gap:2px;
+  min-height:74px; padding:6px 7px; text-align:left;
+  background:var(--surface); border:1px solid var(--line); border-radius:8px;
+  color:var(--ink); font-family:inherit; width:100%;
+  transition:transform .12s ease, box-shadow .15s ease;
+}
+button.kal-cell{ cursor:pointer; }
+button.kal-cell:hover{ transform:translateY(-2px); box-shadow:0 8px 18px -10px rgba(19,26,46,.35); }
+button.kal-cell:focus-visible{ outline:3px solid rgba(37,99,235,.45); outline-offset:1px; }
+.kal-cell.pad{ background:transparent; border:none; min-height:0; }
+.kal-num{ font-size:.82rem; font-weight:800; line-height:1; }
+.kal-cell.minggu .kal-num{ color:var(--bad); }
+.kal-tag{ font-size:.62rem; font-weight:800; letter-spacing:.03em; text-transform:uppercase; line-height:1.1; }
+.kal-sub{ font-size:.6rem; color:var(--ink-soft); line-height:1.15; overflow:hidden; text-overflow:ellipsis; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; word-break:break-word; }
+.kal-minis{ display:flex; flex-wrap:wrap; gap:3px; margin-top:auto; }
+.kal-mini{ font-size:.6rem; font-weight:800; font-family:'Courier New',monospace; padding:1px 5px; border-radius:4px; line-height:1.3; }
+.kal-mini.h{ background:var(--good-soft); color:#0F5A2A; }
+.kal-mini.i{ background:var(--warn-soft); color:#8A4A0B; }
+.kal-mini.s{ background:var(--info-soft); color:#1E3A6E; }
+.kal-mini.a{ background:var(--bad-soft); color:#8A1B1B; }
+
+.kal-cell.hadir{ background:var(--good-soft); border-color:#BFE6CB; }
+.kal-cell.hadir .kal-tag{ color:#0F5A2A; }
+.kal-cell.izin{ background:var(--warn-soft); border-color:#F5CFA9; }
+.kal-cell.izin .kal-tag{ color:#8A4A0B; }
+.kal-cell.sakit{ background:var(--info-soft); border-color:#BBD3F7; }
+.kal-cell.sakit .kal-tag{ color:#1E3A6E; }
+.kal-cell.alpa{ background:var(--bad-soft); border-color:#F3BCBC; }
+.kal-cell.alpa .kal-tag{ color:#8A1B1B; }
+.kal-cell.libur{ background:#FFF4DC; border-color:#F4D48A; }
+.kal-cell.libur .kal-tag{ color:#8A5A00; }
+.kal-cell.weekend{ background:#F7F8FA; }
+.kal-cell.weekend .kal-num{ color:#9CA3AF; }
+.kal-cell.minggu.weekend .kal-num{ color:#E59A9A; }
+.kal-cell.tanpa{ background:repeating-linear-gradient(45deg,#fff,#fff 5px,#FBEDED 5px,#FBEDED 10px); border-color:#F3D0D0; }
+.kal-cell.tanpa .kal-tag{ color:#B45454; }
+.kal-cell.hari-ini{ box-shadow:0 0 0 2px var(--navy); }
+.kal-cell.dipilih{ box-shadow:0 0 0 2px var(--gold); }
+.kal-cell.hari-ini.dipilih{ box-shadow:0 0 0 2px var(--navy), 0 0 0 4px var(--gold); }
+
+.kal-legend{ display:flex; flex-wrap:wrap; gap:6px 14px; margin-top:14px; font-size:.7rem; color:var(--ink-soft); }
+.kal-legend span{ display:inline-flex; align-items:center; gap:5px; }
+.kal-legend i{ width:11px; height:11px; border-radius:3px; display:inline-block; border:1px solid var(--line); }
+.kal-legend i.hadir{ background:var(--good-soft); border-color:#BFE6CB; }
+.kal-legend i.izin{ background:var(--warn-soft); border-color:#F5CFA9; }
+.kal-legend i.sakit{ background:var(--info-soft); border-color:#BBD3F7; }
+.kal-legend i.alpa{ background:var(--bad-soft); border-color:#F3BCBC; }
+.kal-legend i.libur{ background:#FFF4DC; border-color:#F4D48A; }
+.kal-legend i.weekend{ background:#F7F8FA; }
+.kal-legend i.tanpa{ background:repeating-linear-gradient(45deg,#fff,#fff 3px,#F5D5D5 3px,#F5D5D5 6px); border-color:#F3D0D0; }
+
+.kal-detail{ margin-top:14px; border:1px solid var(--line); border-left:4px solid var(--navy); border-radius:8px; padding:12px 16px; background:var(--surface); }
+.kal-detail .kd-judul{ font-size:.72rem; font-weight:800; letter-spacing:.06em; text-transform:uppercase; color:var(--ink-soft); }
+.kal-detail .kd-status{ font-size:1.05rem; font-weight:800; margin:2px 0 4px; }
+.kal-detail ul{ margin:0; padding-left:18px; font-size:.8rem; color:var(--ink); }
+.kal-detail.hadir{ border-left-color:var(--good); }
+.kal-detail.izin{ border-left-color:var(--warn); }
+.kal-detail.sakit{ border-left-color:var(--info); }
+.kal-detail.alpa{ border-left-color:var(--bad); }
+.kal-detail.libur{ border-left-color:#E0A526; }
+.kal-detail.tanpa{ border-left-color:#B45454; }
+
+.kal-libur-list{ margin-top:14px; }
+.kal-libur-list .kl-title{ font-size:.7rem; font-weight:800; letter-spacing:.06em; text-transform:uppercase; color:var(--ink-soft); margin-bottom:8px; }
+.kal-libur-item{ display:flex; align-items:center; gap:10px; padding:7px 0; border-top:1px solid var(--line); font-size:.8rem; }
+.kal-libur-item:first-of-type{ border-top:none; }
+.kal-libur-item .kl-tgl{ font-family:'Courier New',monospace; font-weight:800; background:#FFF4DC; color:#8A5A00; border-radius:6px; padding:3px 8px; flex-shrink:0; }
+.kal-libur-item .kl-jenis{ margin-left:auto; font-size:.68rem; color:var(--ink-soft); white-space:nowrap; }
+
+@media (max-width: 575.98px){
+  .kal-grid{ gap:4px; }
+  .kal-cell{ min-height:54px; padding:5px 4px; }
+  .kal-sub{ display:none; }
+  .kal-tag{ font-size:.5rem; }
+  .kal-mini{ font-size:.52rem; padding:0 3px; }
+  .gv-panel{ padding:14px 12px; }
+}
 </style>
 
 <div class="gv-topline">
@@ -510,6 +774,103 @@ body{ background:var(--bg); color:var(--ink); font-family:'Inter',system-ui,sans
 </div>
 <?php endif; ?>
 
+<!-- ===== Kalender Kehadiran & Hari Libur ===== -->
+<div class="gv-section-label" id="kalender">
+  Kalender Kehadiran &amp; Hari Libur<?= $kelasSaya ? ' — Kelas '.clean($kelasSaya['nama_kelas']) : '' ?>
+</div>
+<div class="gv-panel">
+  <div class="kal-head">
+    <div class="kal-judul"><i class="bi bi-calendar3"></i> <?= clean($judulBulan) ?></div>
+    <div class="kal-nav">
+      <a href="?bulan=<?= $bulanSebelum ?>#kalender" title="Bulan sebelumnya" aria-label="Bulan sebelumnya"><i class="bi bi-chevron-left"></i></a>
+      <?php if (!$adalahBulanIni): ?>
+        <a href="?bulan=<?= date('Y-m') ?>#kalender">Bulan ini</a>
+      <?php endif; ?>
+      <a href="?bulan=<?= $bulanBerikut ?>#kalender" title="Bulan berikutnya" aria-label="Bulan berikutnya"><i class="bi bi-chevron-right"></i></a>
+    </div>
+  </div>
+
+  <div class="kal-summary">
+    <?php if ($isSiswaKal): ?>
+      <span class="kal-sum hadir"><i class="bi bi-check-circle-fill"></i> Hadir <b><?= $ringkasBulan['Hadir'] ?></b> hari</span>
+      <span class="kal-sum izin"><i class="bi bi-envelope-paper-fill"></i> Izin <b><?= $ringkasBulan['Izin'] ?></b> hari</span>
+      <span class="kal-sum sakit"><i class="bi bi-heart-pulse-fill"></i> Sakit <b><?= $ringkasBulan['Sakit'] ?></b> hari</span>
+      <span class="kal-sum alpa"><i class="bi bi-x-circle-fill"></i> Alpa <b><?= $ringkasBulan['Alpa'] ?></b> hari</span>
+    <?php else: ?>
+      <span class="kal-sum hadir"><i class="bi bi-check-circle-fill"></i> Hadir <b><?= $ringkasBulan['Hadir'] ?></b></span>
+      <span class="kal-sum izin"><i class="bi bi-envelope-paper-fill"></i> Izin <b><?= $ringkasBulan['Izin'] ?></b></span>
+      <span class="kal-sum sakit"><i class="bi bi-heart-pulse-fill"></i> Sakit <b><?= $ringkasBulan['Sakit'] ?></b></span>
+      <span class="kal-sum alpa"><i class="bi bi-x-circle-fill"></i> Alpa <b><?= $ringkasBulan['Alpa'] ?></b></span>
+    <?php endif; ?>
+    <span class="kal-sum libur"><i class="bi bi-calendar-x-fill"></i> Libur <b><?= $jumlahLiburBulan ?></b> hari</span>
+  </div>
+
+  <div class="kal-grid kal-dow">
+    <div>Sen</div><div>Sel</div><div>Rab</div><div>Kam</div><div>Jum</div><div>Sab</div><div>Min</div>
+  </div>
+  <div class="kal-grid" id="kalGrid">
+    <?php for ($p = 0; $p < $offsetAwal; $p++): ?>
+      <div class="kal-cell pad" aria-hidden="true"></div>
+    <?php endfor; ?>
+
+    <?php foreach ($kalHari as $c):
+        $kelasCell = 'kal-cell ' . $c['kls'];
+        if ($c['minggu']) { $kelasCell .= ' minggu'; }
+        if ($c['tgl'] === $hariIni) { $kelasCell .= ' hari-ini'; }
+    ?>
+      <button type="button" class="<?= $kelasCell ?>" data-tgl="<?= $c['tgl'] ?>" aria-label="<?= clean($kalDetail[$c['tgl']]['judul']) ?>">
+        <span class="kal-num"><?= $c['d'] ?></span>
+        <?php if ($c['tag'] !== ''): ?><span class="kal-tag"><?= clean($c['tag']) ?></span><?php endif; ?>
+        <?php if ($c['sub'] !== ''): ?><span class="kal-sub"><?= clean($c['sub']) ?></span><?php endif; ?>
+        <?php if (!empty($c['mini'])): ?>
+          <span class="kal-minis">
+            <?php foreach ($c['mini'] as $mi): ?>
+              <span class="kal-mini <?= $mi['kode'] ?>" title="<?= clean($mi['st']) ?>: <?= $mi['jml'] ?>"><?= strtoupper($mi['kode']) ?><?= $mi['jml'] ?></span>
+            <?php endforeach; ?>
+          </span>
+        <?php endif; ?>
+      </button>
+    <?php endforeach; ?>
+  </div>
+
+  <div class="kal-legend">
+    <?php if ($isSiswaKal): ?>
+      <span><i class="hadir"></i> Hadir (jam masuk – pulang)</span>
+      <span><i class="izin"></i> Izin</span>
+      <span><i class="sakit"></i> Sakit</span>
+      <span><i class="alpa"></i> Alpa</span>
+      <span><i class="libur"></i> Libur</span>
+      <span><i class="weekend"></i> Akhir pekan</span>
+      <span><i class="tanpa"></i> Kosong = hari sekolah tanpa data presensi</span>
+    <?php else: ?>
+      <span><i class="hadir"></i> H = Hadir</span>
+      <span><i class="izin"></i> I = Izin</span>
+      <span><i class="sakit"></i> S = Sakit</span>
+      <span><i class="alpa"></i> A = Alpa</span>
+      <span><i class="libur"></i> Libur</span>
+      <span><i class="weekend"></i> Akhir pekan</span>
+    <?php endif; ?>
+  </div>
+
+  <div class="kal-detail" id="kalDetail">
+    <div class="kd-judul">Detail Tanggal</div>
+    <div class="kd-status text-muted">Klik salah satu tanggal untuk melihat rinciannya.</div>
+  </div>
+
+  <?php if (!empty($kalLibur)): ?>
+  <div class="kal-libur-list">
+    <div class="kl-title">Hari Libur Bulan Ini</div>
+    <?php foreach ($kalLibur as $tglLibur => $lb): ?>
+      <div class="kal-libur-item">
+        <span class="kl-tgl"><?= date('d', strtotime($tglLibur)) ?> <?= substr($namaBulanIndo[(int)date('n', strtotime($tglLibur))], 0, 3) ?></span>
+        <span><?= clean($lb['keterangan']) ?></span>
+        <span class="kl-jenis"><?= clean($lb['jenis']) ?></span>
+      </div>
+    <?php endforeach; ?>
+  </div>
+  <?php endif; ?>
+</div>
+
 <!-- ===== Menu Cepat — khusus admin ===== -->
 <?php if (!empty($menuCepat)): ?>
 <div class="gv-section-label">Menu Cepat</div>
@@ -585,6 +946,57 @@ function updateClocks(){
 }
 updateClocks();
 setInterval(updateClocks, 1000);
+</script>
+
+<script>
+/* ===== Kalender: klik tanggal -> tampilkan rincian ===== */
+(function () {
+  const DETAIL = <?= json_encode($kalDetail, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) ?>;
+  const HARI_INI = <?= json_encode($hariIni) ?>;
+  const panel = document.getElementById('kalDetail');
+  const grid  = document.getElementById('kalGrid');
+  if (!panel || !grid) return;
+
+  function tampil(tgl) {
+    const d = DETAIL[tgl];
+    if (!d) return;
+
+    grid.querySelectorAll('.kal-cell.dipilih').forEach(function (el) { el.classList.remove('dipilih'); });
+    const sel = grid.querySelector('.kal-cell[data-tgl="' + tgl + '"]');
+    if (sel) sel.classList.add('dipilih');
+
+    panel.className = 'kal-detail' + (d.kls ? ' ' + d.kls : '');
+    panel.textContent = ''; // textContent/createElement: isi dari database tidak diperlakukan sebagai HTML
+
+    const judul = document.createElement('div');
+    judul.className = 'kd-judul';
+    judul.textContent = d.judul;
+    panel.appendChild(judul);
+
+    const status = document.createElement('div');
+    status.className = 'kd-status';
+    status.textContent = d.status || '-';
+    panel.appendChild(status);
+
+    if (d.baris && d.baris.length) {
+      const ul = document.createElement('ul');
+      d.baris.forEach(function (teks) {
+        const li = document.createElement('li');
+        li.textContent = teks;
+        ul.appendChild(li);
+      });
+      panel.appendChild(ul);
+    }
+  }
+
+  grid.addEventListener('click', function (e) {
+    const cell = e.target.closest('.kal-cell[data-tgl]');
+    if (cell) tampil(cell.dataset.tgl);
+  });
+
+  // Pilih hari ini secara otomatis kalau bulan yang tampil memuat hari ini
+  if (DETAIL[HARI_INI]) tampil(HARI_INI);
+})();
 </script>
 
 <?php if ($user['role'] === 'siswa'): ?>

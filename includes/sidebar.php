@@ -6,13 +6,39 @@ $currentDir  = basename(dirname($_SERVER['PHP_SELF']));
 function navActive($dirOrFile, $currentDir, $currentPage) {
     return ($dirOrFile === $currentPage || $dirOrFile === $currentDir) ? 'active' : '';
 }
+
+// Dashboard hanya aktif di index.php utama. Sebelumnya semua halaman bernama
+// index.php (nilai/, ujian/, izin/, dst.) ikut menyalakan menu Dashboard.
+$folderModul = ['siswa','kelas','mapel','absensi','lokasi','nilai','rapor','elearning','ujian','pengumuman','users','izin','libur'];
+$dashboardAktif = ($currentPage === 'index.php' && !in_array($currentDir, $folderModul, true)) ? 'active' : '';
+
+// Jumlah izin yang menunggu konfirmasi (badge untuk wali kelas & guru).
+// Dibungkus try-catch supaya sidebar tetap tampil kalau tabel izin belum dimigrasi.
+$jumlahIzinMenunggu = 0;
+if (in_array($role, ['wali_kelas', 'guru'], true) && isset($pdo)) {
+    try {
+        if ($role === 'wali_kelas') {
+            $kelasWaliSidebar = kelasWaliSaya($pdo, currentUser()['id']);
+            if ($kelasWaliSidebar) {
+                $stmtIzin = $pdo->prepare("SELECT COUNT(*) FROM izin WHERE status = 'Menunggu' AND kelas_id = ?");
+                $stmtIzin->execute([$kelasWaliSidebar['id']]);
+                $jumlahIzinMenunggu = (int)$stmtIzin->fetchColumn();
+            }
+        } else {
+            $jumlahIzinMenunggu = (int)$pdo->query("SELECT COUNT(*) FROM izin WHERE status = 'Menunggu'")->fetchColumn();
+        }
+    } catch (Throwable $e) {
+        $jumlahIzinMenunggu = 0;
+    }
+}
+$labelMenuIzin = ['siswa' => 'Ajukan Izin', 'wali_kelas' => 'Konfirmasi Izin', 'guru' => 'Konfirmasi Izin', 'admin' => 'Izin Siswa'][$role] ?? 'Izin Siswa';
 ?>
 <aside class="sidebar" id="sidebar">
   <div class="p-3">
     <ul class="nav nav-pills flex-column gap-1">
 
       <li class="nav-item">
-        <a class="nav-link <?= navActive('index.php', $currentDir, $currentPage) ?>" href="<?= BASE_URL ?>/index.php">
+        <a class="nav-link <?= $dashboardAktif ?>" href="<?= BASE_URL ?>/index.php">
           <i class="bi bi-speedometer2"></i>Dashboard
         </a>
       </li>
@@ -80,6 +106,16 @@ function navActive($dirOrFile, $currentDir, $currentPage) {
         </li>
       <?php endif; ?>
 
+      <!-- Menu Izin: semua role (siswa mengajukan, wali kelas & guru mengonfirmasi, admin hanya melihat) -->
+      <li class="nav-item">
+        <a class="nav-link <?= navActive('izin', $currentDir, $currentPage) ?>" href="<?= BASE_URL ?>/izin/index.php">
+          <i class="bi bi-envelope-paper-fill"></i><?= $labelMenuIzin ?>
+          <?php if ($jumlahIzinMenunggu > 0): ?>
+            <span class="badge bg-warning text-dark ms-2"><?= $jumlahIzinMenunggu ?></span>
+          <?php endif; ?>
+        </a>
+      </li>
+
       <?php if ($role === 'admin'): ?>
         <li class="nav-item">
           <a class="nav-link gps-link <?= navActive('lokasi', $currentDir, $currentPage) ?>" href="<?= BASE_URL ?>/lokasi/index.php">
@@ -95,6 +131,14 @@ function navActive($dirOrFile, $currentDir, $currentPage) {
           <i class="bi bi-clipboard-data-fill"></i>Nilai / Rapor
         </a>
       </li>
+
+      <?php if (in_array($role, ['admin','guru','wali_kelas'])): ?>
+      <li class="nav-item">
+        <a class="nav-link <?= navActive('rapor', $currentDir, $currentPage) ?>" href="<?= BASE_URL ?>/rapor/kelas.php">
+          <i class="bi bi-folder2-open"></i>Rapor Sekelas
+        </a>
+      </li>
+      <?php endif; ?>
 
       <li class="nav-item">
         <a class="nav-link <?= navActive('materi.php', $currentDir, $currentPage) ?>" href="<?= BASE_URL ?>/elearning/materi.php">

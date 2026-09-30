@@ -1,4 +1,15 @@
 <?php
+// Set timezone eksplisit — INI PENYEBAB PALING UMUM ujian dianggap "Belum
+// dibuka"/"Ditutup" padahal jamnya sudah lewat: tanpa ini PHP default ke UTC,
+// sehingga waktu_mulai/waktu_selesai yang disimpan (angka jam apa adanya,
+// misalnya "15:42") dibaca ulang seolah-olah UTC, meleset dari jam asli
+// Indonesia. HARUS SAMA dengan timezone di absensi/gps.php dan index.php
+// (dashboard), supaya jam yang dilihat siswa/guru konsisten di semua halaman.
+//   WIB (Jakarta/Sumatera/Jawa/Kalbar-Kalteng) -> 'Asia/Jakarta'
+//   WITA (Bali/NTB/NTT/Kalimantan lainnya/Sulawesi) -> 'Asia/Makassar'
+//   WIT (Maluku/Papua) -> 'Asia/Jayapura'
+date_default_timezone_set('Asia/Makassar');
+
 /**
  * Fungsi bantu modul Ujian (UTS/UAS).
  * Di-require oleh semua halaman di folder ujian/ (setelah auth.php).

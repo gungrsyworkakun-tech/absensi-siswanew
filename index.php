@@ -53,12 +53,13 @@ if ($user['role'] === 'admin') {
         ['label' => 'Data Siswa',          'icon' => 'bi-people-fill',            'url' => '/siswa/list.php'],
         ['label' => 'Data Kelas',          'icon' => 'bi-diagram-3-fill',         'url' => '/kelas/list.php'],
         ['label' => 'Mata Pelajaran',      'icon' => 'bi-journal-bookmark-fill',  'url' => '/mapel/list.php'],
-        ['label' => 'Kelola Akun',         'icon' => 'bi-person-badge-fill',      'url' => '/akun/list.php'],
+        ['label' => 'Kelola Akun',         'icon' => 'bi-person-badge-fill',      'url' => '/users/list.php'],
         ['label' => 'Input Absensi',       'icon' => 'bi-calendar2-check-fill',   'url' => '/absensi/index.php'],
         ['label' => 'Absensi Per Mapel',   'icon' => 'bi-journal-check',          'url' => '/absensi/mapel.php'],
         ['label' => 'Monitor GPS',         'icon' => 'bi-geo-alt-fill',           'url' => '/absensi/monitor.php'],
         ['label' => 'Lokasi & Radius GPS', 'icon' => 'bi-geo-fill',               'url' => '/lokasi/index.php'],
         ['label' => 'Hari Libur',          'icon' => 'bi-calendar-x-fill',        'url' => '/libur/index.php'],
+        ['label' => 'Izin Siswa',          'icon' => 'bi-envelope-paper-fill',    'url' => '/izin/index.php'],
         ['label' => 'Rekap Absensi',       'icon' => 'bi-bar-chart-fill',         'url' => '/absensi/rekap.php'],
         ['label' => 'Nilai / Rapor',       'icon' => 'bi-clipboard-data-fill',    'url' => '/nilai/index.php'],
         ['label' => 'Materi Belajar',      'icon' => 'bi-journal-richtext',       'url' => '/elearning/materi.php'],
@@ -471,6 +472,30 @@ body{ background:var(--bg); color:var(--ink); font-family:'Inter',system-ui,sans
 .gv-shortcut .icon{ width:42px; height:42px; border-radius:10px; background:var(--brand-soft); display:flex; align-items:center; justify-content:center; font-size:1.15rem; color:var(--navy); }
 .gv-shortcut .label{ font-size:.76rem; font-weight:700; line-height:1.2; }
 
+/* ---- Kartu statistik (Ringkasan Sistem) ---- */
+.gv-stat{
+  --stat-c:#131A2E; --stat-c2:#3B4A7A; --stat-shadow:rgba(19,26,46,.45);
+  position:relative; overflow:hidden; display:flex; align-items:center; gap:14px;
+  background:var(--surface); border:1px solid var(--line); border-radius:14px;
+  padding:18px 18px 18px 22px; height:100%; text-decoration:none; color:var(--ink);
+  transition:transform .15s ease, box-shadow .2s ease;
+}
+.gv-stat::before{ content:""; position:absolute; left:0; top:0; bottom:0; width:5px; background:linear-gradient(180deg,var(--stat-c),var(--stat-c2)); }
+.gv-stat:hover{ transform:translateY(-3px); box-shadow:0 16px 30px -16px var(--stat-shadow); color:var(--ink); }
+.gv-stat-icon{ width:52px; height:52px; border-radius:14px; display:flex; align-items:center; justify-content:center; font-size:1.4rem; color:#fff; flex-shrink:0; position:relative; z-index:1; background:linear-gradient(135deg,var(--stat-c),var(--stat-c2)); box-shadow:0 10px 18px -10px var(--stat-c); }
+.gv-stat-label{ font-size:.68rem; font-weight:800; letter-spacing:.07em; text-transform:uppercase; color:var(--ink-soft); position:relative; z-index:1; }
+.gv-stat-num{ font-size:2.1rem; font-weight:800; line-height:1.1; color:var(--ink); position:relative; z-index:1; }
+.gv-stat-bg{ position:absolute; right:-8px; bottom:-16px; font-size:5.6rem; color:var(--stat-c); opacity:.08; pointer-events:none; }
+.gv-stat.s-navy{ --stat-c:#131A2E; --stat-c2:#3B4A7A; --stat-shadow:rgba(19,26,46,.5); }
+.gv-stat.s-gold{ --stat-c:#F4B740; --stat-c2:#EA7A1B; --stat-shadow:rgba(234,122,27,.5); }
+.gv-stat.s-green{ --stat-c:#16A34A; --stat-c2:#3FCF7A; --stat-shadow:rgba(22,163,74,.5); }
+.gv-stat.s-blue{ --stat-c:#2563EB; --stat-c2:#5B9BFF; --stat-shadow:rgba(37,99,235,.5); }
+
+/* Teks dalam .gv-card (sebelumnya polos karena style-nya hanya untuk .gv-presensi) */
+.gv-card .icon-box{ width:42px; height:42px; border-radius:8px; background:var(--brand-soft); display:flex; align-items:center; justify-content:center; font-size:1.15rem; color:var(--navy); flex-shrink:0; }
+.gv-card .gv-tag{ font-size:.68rem; font-weight:700; letter-spacing:.06em; text-transform:uppercase; color:var(--ink-soft); }
+.gv-card .gv-time{ font-size:1.3rem; font-weight:800; color:var(--ink); }
+
 /* ---- Kalender kehadiran & hari libur ---- */
 #kalender{ scroll-margin-top:80px; }
 .kal-head{ display:flex; align-items:center; justify-content:space-between; gap:10px; flex-wrap:wrap; margin-bottom:14px; }
@@ -682,28 +707,44 @@ button.kal-cell:focus-visible{ outline:3px solid rgba(37,99,235,.45); outline-of
 <div class="gv-section-label">Ringkasan Sistem</div>
 <div class="row g-3">
   <div class="col-6 col-lg-3">
-    <div class="gv-card d-flex align-items-center gap-3">
-      <div class="icon-box"><i class="bi bi-person-workspace"></i></div>
-      <div><div class="gv-tag">Total Guru</div><div class="gv-time"><?= $statSistem['guru'] ?></div></div>
-    </div>
+    <a href="<?= BASE_URL ?>/users/list.php" class="gv-stat s-navy">
+      <div class="gv-stat-icon"><i class="bi bi-person-workspace"></i></div>
+      <div>
+        <div class="gv-stat-label">Total Guru</div>
+        <div class="gv-stat-num"><?= $statSistem['guru'] ?></div>
+      </div>
+      <i class="bi bi-person-workspace gv-stat-bg"></i>
+    </a>
   </div>
   <div class="col-6 col-lg-3">
-    <div class="gv-card d-flex align-items-center gap-3">
-      <div class="icon-box"><i class="bi bi-person-lines-fill"></i></div>
-      <div><div class="gv-tag">Total Wali Kelas</div><div class="gv-time"><?= $statSistem['wali_kelas'] ?></div></div>
-    </div>
+    <a href="<?= BASE_URL ?>/users/list.php" class="gv-stat s-gold">
+      <div class="gv-stat-icon"><i class="bi bi-person-lines-fill"></i></div>
+      <div>
+        <div class="gv-stat-label">Total Wali Kelas</div>
+        <div class="gv-stat-num"><?= $statSistem['wali_kelas'] ?></div>
+      </div>
+      <i class="bi bi-person-lines-fill gv-stat-bg"></i>
+    </a>
   </div>
   <div class="col-6 col-lg-3">
-    <div class="gv-card d-flex align-items-center gap-3">
-      <div class="icon-box"><i class="bi bi-journal-bookmark-fill"></i></div>
-      <div><div class="gv-tag">Mata Pelajaran</div><div class="gv-time"><?= $statSistem['mapel'] ?></div></div>
-    </div>
+    <a href="<?= BASE_URL ?>/mapel/list.php" class="gv-stat s-green">
+      <div class="gv-stat-icon"><i class="bi bi-journal-bookmark-fill"></i></div>
+      <div>
+        <div class="gv-stat-label">Mata Pelajaran</div>
+        <div class="gv-stat-num"><?= $statSistem['mapel'] ?></div>
+      </div>
+      <i class="bi bi-journal-bookmark-fill gv-stat-bg"></i>
+    </a>
   </div>
   <div class="col-6 col-lg-3">
-    <div class="gv-card d-flex align-items-center gap-3">
-      <div class="icon-box"><i class="bi bi-shield-lock-fill"></i></div>
-      <div><div class="gv-tag">Total Akun</div><div class="gv-time"><?= $statSistem['akun'] ?></div></div>
-    </div>
+    <a href="<?= BASE_URL ?>/users/list.php" class="gv-stat s-blue">
+      <div class="gv-stat-icon"><i class="bi bi-shield-lock-fill"></i></div>
+      <div>
+        <div class="gv-stat-label">Total Akun</div>
+        <div class="gv-stat-num"><?= $statSistem['akun'] ?></div>
+      </div>
+      <i class="bi bi-shield-lock-fill gv-stat-bg"></i>
+    </a>
   </div>
 </div>
 <?php endif; ?>
@@ -1122,31 +1163,74 @@ setInterval(updateClocks, 1000);
 <?php
 $extraScripts = '<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>';
 if (in_array($user['role'], ['admin','guru','wali_kelas'])) {
-    $extraScripts .= "
-    <script>
-    const ctx = document.getElementById('chartAbsensi');
-    Chart.defaults.font.family = 'Inter';
-    new Chart(ctx, {
-      type: 'bar',
-      data: {
-        labels: " . json_encode($labels7) . ",
-        datasets: [
-          { label: 'Hadir', data: " . json_encode($dataHadir) . ", backgroundColor: '#16A34A' },
-          { label: 'Izin',  data: " . json_encode($dataIzin)  . ", backgroundColor: '#EA7A1B' },
-          { label: 'Sakit', data: " . json_encode($dataSakit) . ", backgroundColor: '#2563EB' },
-          { label: 'Alpa',  data: " . json_encode($dataAlpa)  . ", backgroundColor: '#DC2626' }
-        ]
+    $chartJs = <<<'JS'
+<script>
+(function () {
+  const canvas = document.getElementById('chartAbsensi');
+  if (!canvas || typeof Chart === 'undefined') return;
+  Chart.defaults.font.family = 'Inter';
+
+  // Gradasi isi area mengikuti tinggi grafik yang sebenarnya
+  function gradasi(hex) {
+    return function (konteks) {
+      const area = konteks.chart.chartArea;
+      if (!area) return hex + '33';
+      const g = konteks.chart.ctx.createLinearGradient(0, area.top, 0, area.bottom);
+      g.addColorStop(0, hex + '66');
+      g.addColorStop(1, hex + '00');
+      return g;
+    };
+  }
+
+  function seri(label, data, warna, isiArea) {
+    return {
+      label: label,
+      data: data,
+      borderColor: warna,
+      backgroundColor: isiArea ? gradasi(warna) : warna,
+      fill: !!isiArea,
+      tension: 0.4,
+      borderWidth: 2.5,
+      pointRadius: 4,
+      pointHoverRadius: 6,
+      pointBackgroundColor: '#fff',
+      pointBorderColor: warna,
+      pointBorderWidth: 2
+    };
+  }
+
+  new Chart(canvas, {
+    type: 'line',
+    data: {
+      labels: __LABELS__,
+      datasets: [
+        seri('Hadir', __HADIR__, '#16A34A', true),
+        seri('Izin',  __IZIN__,  '#EA7A1B', false),
+        seri('Sakit', __SAKIT__, '#2563EB', false),
+        seri('Alpa',  __ALPA__,  '#DC2626', false)
+      ]
+    },
+    options: {
+      responsive: true,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { position: 'bottom', labels: { usePointStyle: true, pointStyle: 'circle', boxWidth: 8, font: { size: 11 } } },
+        tooltip: { backgroundColor: '#131A2E', padding: 10, cornerRadius: 8, usePointStyle: true }
       },
-      options: {
-        responsive: true,
-        plugins: { legend: { labels: { boxWidth: 10, font: { size: 11 } } } },
-        scales: {
-          x: { stacked: true, grid: { display: false } },
-          y: { stacked: true, beginAtZero: true, grid: { color: '#E5E7EE' } }
-        }
+      scales: {
+        x: { grid: { display: false } },
+        y: { beginAtZero: true, ticks: { precision: 0 }, grid: { color: '#EEF0F5' }, border: { display: false } }
       }
-    });
-    </script>";
+    }
+  });
+})();
+</script>
+JS;
+    $extraScripts .= str_replace(
+        ['__LABELS__', '__HADIR__', '__IZIN__', '__SAKIT__', '__ALPA__'],
+        [json_encode($labels7), json_encode($dataHadir), json_encode($dataIzin), json_encode($dataSakit), json_encode($dataAlpa)],
+        $chartJs
+    );
 }
 include __DIR__ . '/includes/footer.php';
 ?>

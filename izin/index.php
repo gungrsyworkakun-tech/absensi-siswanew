@@ -11,6 +11,8 @@ $pageTitle = 'Izin Siswa';
 // Role yang boleh MENYETUJUI / MENOLAK izin. Role lain (admin) hanya bisa melihat.
 // Wali kelas hanya untuk kelasnya sendiri; guru untuk semua kelas.
 const IZIN_PEMROSES     = ['wali_kelas', 'guru'];
+// Role yang boleh MENGHAPUS pengajuan izin (hanya wali kelas, dan hanya untuk kelasnya sendiri).
+const IZIN_PENGHAPUS    = ['wali_kelas'];
 const IZIN_MAKS_HARI    = 14;       // maksimal lama satu pengajuan (hari kalender)
 const IZIN_MAKS_MUNDUR  = 7;        // boleh mengajukan untuk tanggal maksimal 7 hari ke belakang
 const IZIN_MAKS_MAJU    = 60;       // dan maksimal 60 hari ke depan
@@ -21,6 +23,7 @@ requireRole(['siswa', 'wali_kelas', 'guru', 'admin']);
 if (session_status() !== PHP_SESSION_ACTIVE) { session_start(); }
 
 $bisaProses = in_array($user['role'], IZIN_PEMROSES, true);
+$bisaHapus  = in_array($user['role'], IZIN_PENGHAPUS, true);
 
 /* ================= Helper ================= */
 function izinCsrfToken() {
@@ -279,6 +282,51 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $errors[] = 'Terjadi kesalahan saat menyimpan keputusan. Coba lagi.';
             }
         }
+    // ---------- Wali kelas menghapus pengajuan izin (kelasnya sendiri) ----------
+    } elseif ($aksi === 'hapus' && $bisaHapus) {
+        $id = (int)($_POST['id'] ?? 0);
+        $hapusAbsensi = ($_POST['hapus_absensi'] ?? '') === '1';
+        $fileLampiran = null;
+
+        try {
+            $pdo->beginTransaction();
+            $stmt = $pdo->prepare("SELECT * FROM izin WHERE id = ? FOR UPDATE");
+            $stmt->execute([$id]);
+            $izin = $stmt->fetch();
+
+            if (!$izin) {
+                throw new RuntimeException('Data izin tidak ditemukan (mungkin sudah dihapus).');
+            }
+            if ($user['role'] === 'wali_kelas' && (int)$izin['kelas_id'] !== (int)$kelasSaya['id']) {
+                throw new RuntimeException('Anda hanya bisa menghapus izin siswa di kelas Anda.');
+            }
+
+            // Izin yang sudah disetujui sudah ditulis ke tabel absensi. Jika dipilih, hapus juga
+            // catatan absensi hasil izin ini saja (dikenali dari jenis, keterangan, dan input_oleh
+            // yang sama persis dengan yang ditulis saat persetujuan). Catatan lain tidak disentuh.
+            $absensiTerhapus = 0;
+            if ($izin['status'] === 'Disetujui' && $hapusAbsensi) {
+                $ket = mb_substr($izin['jenis'] . ' (disetujui): ' . $izin['alasan'], 0, 255);
+                $stmt = $pdo->prepare("DELETE FROM absensi WHERE siswa_id = ? AND tanggal BETWEEN ? AND ? AND status = ? AND keterangan = ? AND input_oleh LIKE 'Izin - %'");
+                $stmt->execute([$izin['siswa_id'], $izin['tanggal_mulai'], $izin['tanggal_selesai'], $izin['jenis'], $ket]);
+                $absensiTerhapus = $stmt->rowCount();
+            }
+
+            $pdo->prepare("DELETE FROM izin WHERE id = ?")->execute([$id]);
+            $fileLampiran = $izin['lampiran'];
+            $pdo->commit();
+
+            if (!empty($fileLampiran)) { @unlink(izinDirUpload() . '/' . basename($fileLampiran)); }
+
+            setFlash('success', 'Pengajuan izin dihapus' . ($absensiTerhapus ? " beserta {$absensiTerhapus} catatan absensi hasil izin tersebut." : '.'));
+            redirect('izin/index.php');
+        } catch (RuntimeException $e) {
+            if ($pdo->inTransaction()) { $pdo->rollBack(); }
+            $errors[] = $e->getMessage();
+        } catch (PDOException $e) {
+            if ($pdo->inTransaction()) { $pdo->rollBack(); }
+            $errors[] = 'Terjadi kesalahan saat menghapus izin. Coba lagi.';
+        }
     } else {
         $errors[] = 'Aksi tidak diizinkan.';
     }
@@ -452,7 +500,7 @@ include __DIR__ . '/../includes/header.php';
 <?php else: ?>
 <!-- ================= TAMPILAN WALI KELAS / GURU / ADMIN ================= -->
 <?php if ($user['role'] === 'wali_kelas'): ?>
-  <div class="text-muted small mb-3">Izin siswa Kelas <b><?= clean($kelasSaya['nama_kelas']) ?></b>. Anda bisa menyetujui atau menolak pengajuan.</div>
+  <div class="text-muted small mb-3">Izin siswa Kelas <b><?= clean($kelasSaya['nama_kelas']) ?></b>. Anda bisa menyetujui, menolak, atau menghapus pengajuan.</div>
 <?php elseif ($bisaProses): ?>
   <div class="text-muted small mb-3">Daftar izin semua kelas. Anda bisa menyetujui atau menolak pengajuan.</div>
 <?php else: ?>
@@ -530,6 +578,11 @@ include __DIR__ . '/../includes/header.php';
                 data-id="<?= (int)$r['id'] ?>" data-keputusan="tolak"
                 data-nama="<?= clean($r['nama_lengkap']) ?>"><i class="bi bi-x-lg"></i> Tolak</button>
       <?php endif; ?>
+      <?php if ($bisaHapus): ?>
+        <button type="button" class="btn btn-sm btn-outline-secondary btn-hapus ms-sm-auto"
+                data-id="<?= (int)$r['id'] ?>" data-status="<?= clean($r['status']) ?>"
+                data-jenis="<?= clean($r['jenis']) ?>" data-nama="<?= clean($r['nama_lengkap']) ?>"><i class="bi bi-trash3"></i> Hapus</button>
+      <?php endif; ?>
     </div>
 
     <?php if ($r['status'] !== 'Menunggu'): ?>
@@ -591,6 +644,59 @@ include __DIR__ . '/../includes/header.php';
       const submit = document.getElementById('prosesSubmit');
       submit.className = 'btn ' + (setuju ? 'btn-success' : 'btn-danger');
       submit.textContent = setuju ? 'Setujui' : 'Tolak';
+      new bootstrap.Modal(modalEl).show();
+    });
+  });
+})();
+</script>
+<?php endif; ?>
+
+<?php if ($bisaHapus): ?>
+<!-- Modal konfirmasi hapus -->
+<div class="modal fade" id="modalHapus" tabindex="-1">
+  <div class="modal-dialog">
+    <form method="POST" class="modal-content">
+      <input type="hidden" name="csrf" value="<?= clean($csrf) ?>">
+      <input type="hidden" name="aksi" value="hapus">
+      <input type="hidden" name="id" id="hapusId">
+      <div class="modal-header">
+        <h6 class="modal-title mb-0"><i class="bi bi-trash3 me-1"></i> Hapus pengajuan izin</h6>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <p class="mb-2" id="hapusInfo"></p>
+        <p class="small text-muted mb-2">Tindakan ini tidak bisa dibatalkan, dan lampiran (jika ada) ikut terhapus.</p>
+        <div class="form-check d-none" id="hapusAbsensiBox">
+          <input class="form-check-input" type="checkbox" name="hapus_absensi" value="1" id="hapusAbsensi" checked>
+          <label class="form-check-label small" for="hapusAbsensi">
+            Hapus juga catatan absensi (Izin/Sakit) yang dibuat otomatis dari izin ini.
+            <span class="d-block text-muted">Jika tidak dicentang, catatan di absensi tetap ada dan bisa diubah lewat Input Manual.</span>
+          </label>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Batal</button>
+        <button type="submit" class="btn btn-danger"><i class="bi bi-trash3"></i> Hapus</button>
+      </div>
+    </form>
+  </div>
+</div>
+<script>
+(function () {
+  const modalEl = document.getElementById('modalHapus');
+  if (!modalEl) return;
+  document.querySelectorAll('.btn-hapus').forEach(function (b) {
+    b.addEventListener('click', function () {
+      const disetujui = this.dataset.status === 'Disetujui';
+      document.getElementById('hapusId').value = this.dataset.id;
+      document.getElementById('hapusInfo').textContent =
+        'Pengajuan ' + this.dataset.jenis.toLowerCase() + ' milik ' + this.dataset.nama +
+        ' (status: ' + this.dataset.status + ') akan dihapus.';
+      const box = document.getElementById('hapusAbsensiBox');
+      const cb = document.getElementById('hapusAbsensi');
+      box.classList.toggle('d-none', !disetujui);
+      cb.checked = disetujui;
+      cb.disabled = !disetujui; // checkbox nonaktif tidak ikut terkirim
       new bootstrap.Modal(modalEl).show();
     });
   });

@@ -106,6 +106,22 @@ $labelMenuIzin = ['siswa' => 'Ajukan Izin', 'wali_kelas' => 'Konfirmasi Izin', '
         </li>
       <?php endif; ?>
 
+      <?php if (in_array($role, ['guru','wali_kelas'])): ?>
+        <li class="nav-item">
+          <a class="nav-link gps-link <?= navActive('guru.php', $currentDir, $currentPage) ?>" href="<?= BASE_URL ?>/absensi/guru.php">
+            <i class="bi bi-person-check-fill"></i>Absen Guru
+          </a>
+        </li>
+      <?php endif; ?>
+
+      <?php if (in_array($role, ['admin','kepala_sekolah'])): ?>
+        <li class="nav-item">
+          <a class="nav-link <?= navActive('guru_monitor.php', $currentDir, $currentPage) ?>" href="<?= BASE_URL ?>/absensi/guru_monitor.php">
+            <i class="bi bi-person-lines-fill"></i>Kehadiran Guru
+          </a>
+        </li>
+      <?php endif; ?>
+
       <!-- Menu Izin: semua role (siswa mengajukan, wali kelas & guru mengonfirmasi, admin hanya melihat) -->
       <li class="nav-item">
         <a class="nav-link <?= navActive('izin', $currentDir, $currentPage) ?>" href="<?= BASE_URL ?>/izin/index.php">

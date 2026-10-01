@@ -60,6 +60,7 @@ if ($user['role'] === 'admin') {
         ['label' => 'Lokasi & Radius GPS', 'icon' => 'bi-geo-fill',               'url' => '/lokasi/index.php'],
         ['label' => 'Hari Libur',          'icon' => 'bi-calendar-x-fill',        'url' => '/libur/index.php'],
         ['label' => 'Izin Siswa',          'icon' => 'bi-envelope-paper-fill',    'url' => '/izin/index.php'],
+        ['label' => 'Kehadiran Guru',      'icon' => 'bi-person-check-fill',      'url' => '/absensi/guru_monitor.php'],
         ['label' => 'Rekap Absensi',       'icon' => 'bi-bar-chart-fill',         'url' => '/absensi/rekap.php'],
         ['label' => 'Nilai / Rapor',       'icon' => 'bi-clipboard-data-fill',    'url' => '/nilai/index.php'],
         ['label' => 'Materi Belajar',      'icon' => 'bi-journal-richtext',       'url' => '/elearning/materi.php'],
@@ -154,6 +155,36 @@ if ($sudahMasuk && $user['role'] === 'siswa' && $user['siswa_id']) {
 
 // ==== Pengumuman terbaru ====
 $pengumuman = $pdo->query("SELECT * FROM pengumuman ORDER BY tanggal DESC, id DESC LIMIT 4")->fetchAll();
+
+// ==== Kehadiran guru: ringkasan untuk admin / presensi sendiri untuk guru & wali kelas ====
+// Dibungkus try-catch supaya dashboard tetap tampil kalau guru_tambah.sql belum diimport.
+$guruAbsen = ['tersedia' => false, 'total' => 0, 'tepat' => 0, 'terlambat' => 0, 'belum' => 0, 'daftar' => []];
+$absenGuruSaya = null;
+if (in_array($user['role'], ['admin', 'guru', 'wali_kelas'], true)) {
+    try {
+        if ($user['role'] === 'admin') {
+            $guruAbsen['total'] = (int)$pdo->query("SELECT COUNT(*) FROM users WHERE role IN ('guru','wali_kelas')")->fetchColumn();
+            $stmt = $pdo->prepare("SELECT COUNT(*) hadir, COALESCE(SUM(terlambat),0) tl FROM absensi_guru WHERE tanggal = ? AND jam_masuk IS NOT NULL");
+            $stmt->execute([$hariIni]);
+            $rg = $stmt->fetch();
+            $hadirG = (int)$rg['hadir'];
+            $guruAbsen['terlambat'] = (int)$rg['tl'];
+            $guruAbsen['tepat'] = $hadirG - $guruAbsen['terlambat'];
+            $guruAbsen['belum'] = max(0, $guruAbsen['total'] - $hadirG);
+
+            $stmt = $pdo->prepare("SELECT u.nama, u.role, a.jam_masuk, a.jam_pulang, a.terlambat FROM absensi_guru a JOIN users u ON a.user_id = u.id WHERE a.tanggal = ? AND a.jam_masuk IS NOT NULL ORDER BY a.jam_masuk DESC LIMIT 6");
+            $stmt->execute([$hariIni]);
+            $guruAbsen['daftar'] = $stmt->fetchAll();
+        } else {
+            $stmt = $pdo->prepare("SELECT * FROM absensi_guru WHERE user_id = ? AND tanggal = ?");
+            $stmt->execute([$user['id'], $hariIni]);
+            $absenGuruSaya = $stmt->fetch() ?: null;
+        }
+        $guruAbsen['tersedia'] = true;
+    } catch (PDOException $e) {
+        $guruAbsen['tersedia'] = false;
+    }
+}
 
 /* =========================================================
    KALENDER KEHADIRAN & HARI LIBUR
@@ -490,6 +521,15 @@ body{ background:var(--bg); color:var(--ink); font-family:'Inter',system-ui,sans
 .gv-stat.s-gold{ --stat-c:#F4B740; --stat-c2:#EA7A1B; --stat-shadow:rgba(234,122,27,.5); }
 .gv-stat.s-green{ --stat-c:#16A34A; --stat-c2:#3FCF7A; --stat-shadow:rgba(22,163,74,.5); }
 .gv-stat.s-blue{ --stat-c:#2563EB; --stat-c2:#5B9BFF; --stat-shadow:rgba(37,99,235,.5); }
+.gv-stat.s-red{ --stat-c:#DC2626; --stat-c2:#FF7A7A; --stat-shadow:rgba(220,38,38,.5); }
+
+/* ---- Daftar absen guru hari ini ---- */
+.gv-guru-row{ display:flex; align-items:center; gap:12px; padding:9px 0; border-top:1px solid var(--line); font-size:.84rem; }
+.gv-guru-row:first-of-type{ border-top:none; }
+.gv-guru-row .gg-avatar{ width:34px; height:34px; border-radius:50%; background:var(--brand-soft); color:var(--navy); display:flex; align-items:center; justify-content:center; font-weight:800; flex-shrink:0; }
+.gv-guru-row .gg-nama{ font-weight:700; }
+.gv-guru-row .gg-sub{ font-size:.72rem; color:var(--ink-soft); }
+.gv-guru-row .gg-jam{ margin-left:auto; text-align:right; font-family:'Courier New',monospace; font-weight:800; }
 
 /* Teks dalam .gv-card (sebelumnya polos karena style-nya hanya untuk .gv-presensi) */
 .gv-card .icon-box{ width:42px; height:42px; border-radius:8px; background:var(--brand-soft); display:flex; align-items:center; justify-content:center; font-size:1.15rem; color:var(--navy); flex-shrink:0; }
@@ -702,6 +742,46 @@ button.kal-cell:focus-visible{ outline:3px solid rgba(37,99,235,.45); outline-of
 </div>
 <?php endif; ?>
 
+<?php if (in_array($user['role'], ['guru', 'wali_kelas'], true)): ?>
+<!-- ===== Presensi saya (guru & wali kelas) ===== -->
+<div class="gv-section-label">Presensi Saya</div>
+<?php if (!$guruAbsen['tersedia']): ?>
+  <div class="gv-info-bar"><i class="bi bi-info-circle-fill"></i> Fitur absen guru belum aktif. Hubungi admin untuk mengimport <b>guru_tambah.sql</b>.</div>
+<?php else:
+    $gMasuk  = $absenGuruSaya && !empty($absenGuruSaya['jam_masuk']);
+    $gPulang = $absenGuruSaya && !empty($absenGuruSaya['jam_pulang']);
+?>
+<div class="row g-3">
+  <div class="col-md-6">
+    <a href="<?= BASE_URL ?>/absensi/guru.php" class="gv-presensi <?= $gMasuk ? 'done' : 'pending klik' ?>" style="text-decoration:none;color:inherit;">
+      <div class="icon-box"><i class="bi bi-box-arrow-in-right"></i></div>
+      <div>
+        <div class="gv-tag">Absen Masuk</div>
+        <div class="gv-time"><?= $gMasuk ? substr($absenGuruSaya['jam_masuk'], 0, 5) : '— Belum absen' ?></div>
+        <div class="gv-note <?= $gMasuk ? '' : 'link' ?>">
+          <i class="bi <?= $gMasuk ? 'bi-check-circle' : 'bi-cursor-fill' ?>"></i>
+          <span><?= $gMasuk ? (!empty($absenGuruSaya['terlambat']) ? 'Terlambat' : 'Tepat waktu') : 'Ketuk untuk absen' ?></span>
+        </div>
+      </div>
+    </a>
+  </div>
+  <div class="col-md-6">
+    <a href="<?= BASE_URL ?>/absensi/guru.php" class="gv-presensi <?= $gPulang ? 'done' : ($gMasuk ? 'pending klik' : 'pending') ?>" style="text-decoration:none;color:inherit;">
+      <div class="icon-box"><i class="bi bi-box-arrow-right"></i></div>
+      <div>
+        <div class="gv-tag">Absen Pulang</div>
+        <div class="gv-time"><?= $gPulang ? substr($absenGuruSaya['jam_pulang'], 0, 5) : '— Belum absen' ?></div>
+        <div class="gv-note <?= $gPulang ? '' : 'link' ?>">
+          <i class="bi <?= $gPulang ? 'bi-check-circle' : 'bi-cursor-fill' ?>"></i>
+          <span><?= $gPulang ? 'Sudah absen' : ($gMasuk ? 'Ketuk untuk absen pulang' : 'Absen masuk dulu') ?></span>
+        </div>
+      </div>
+    </a>
+  </div>
+</div>
+<?php endif; ?>
+<?php endif; ?>
+
 <!-- ===== Ringkasan Sistem — khusus admin ===== -->
 <?php if ($user['role'] === 'admin'): ?>
 <div class="gv-section-label">Ringkasan Sistem</div>
@@ -778,6 +858,75 @@ button.kal-cell:focus-visible{ outline:3px solid rgba(37,99,235,.45); outline-of
   </div>
   <?php endif; ?>
 </div>
+<?php endif; ?>
+
+<?php if ($user['role'] === 'admin'): ?>
+<!-- ===== Kehadiran Guru Hari Ini — khusus admin ===== -->
+<div class="gv-section-label">Kehadiran Guru Hari Ini</div>
+<?php if (!$guruAbsen['tersedia']): ?>
+  <div class="gv-info-bar" style="background:var(--warn-soft);color:#7A3E0B;">
+    <i class="bi bi-exclamation-triangle-fill"></i>
+    Fitur <b>Absen Guru</b> belum aktif. Import file <b>guru_tambah.sql</b> ke database lalu refresh halaman ini.
+  </div>
+<?php else: ?>
+<div class="row g-3">
+  <div class="col-6 col-lg-3">
+    <a href="<?= BASE_URL ?>/absensi/guru_monitor.php" class="gv-stat s-navy">
+      <div class="gv-stat-icon"><i class="bi bi-people-fill"></i></div>
+      <div><div class="gv-stat-label">Guru &amp; Wali Kelas</div><div class="gv-stat-num"><?= $guruAbsen['total'] ?></div></div>
+      <i class="bi bi-people-fill gv-stat-bg"></i>
+    </a>
+  </div>
+  <div class="col-6 col-lg-3">
+    <a href="<?= BASE_URL ?>/absensi/guru_monitor.php" class="gv-stat s-green">
+      <div class="gv-stat-icon"><i class="bi bi-check2-circle"></i></div>
+      <div><div class="gv-stat-label">Tepat Waktu</div><div class="gv-stat-num"><?= $guruAbsen['tepat'] ?></div></div>
+      <i class="bi bi-check2-circle gv-stat-bg"></i>
+    </a>
+  </div>
+  <div class="col-6 col-lg-3">
+    <a href="<?= BASE_URL ?>/absensi/guru_monitor.php" class="gv-stat s-gold">
+      <div class="gv-stat-icon"><i class="bi bi-alarm-fill"></i></div>
+      <div><div class="gv-stat-label">Terlambat</div><div class="gv-stat-num"><?= $guruAbsen['terlambat'] ?></div></div>
+      <i class="bi bi-alarm-fill gv-stat-bg"></i>
+    </a>
+  </div>
+  <div class="col-6 col-lg-3">
+    <a href="<?= BASE_URL ?>/absensi/guru_monitor.php" class="gv-stat s-red">
+      <div class="gv-stat-icon"><i class="bi bi-person-x-fill"></i></div>
+      <div>
+        <div class="gv-stat-label"><?= $infoLiburHariIni['libur'] ? 'Hari Libur' : 'Belum Absen' ?></div>
+        <div class="gv-stat-num"><?= $infoLiburHariIni['libur'] ? '-' : $guruAbsen['belum'] ?></div>
+      </div>
+      <i class="bi bi-person-x-fill gv-stat-bg"></i>
+    </a>
+  </div>
+</div>
+
+<div class="gv-panel mt-3">
+  <div class="d-flex justify-content-between align-items-center mb-2">
+    <div class="gv-panel-title mb-0">Absen Masuk Terbaru</div>
+    <a href="<?= BASE_URL ?>/absensi/guru_monitor.php" class="btn btn-sm btn-outline-dark">Lihat semua <i class="bi bi-arrow-right"></i></a>
+  </div>
+  <?php if (empty($guruAbsen['daftar'])): ?>
+    <div class="text-muted small py-2">Belum ada guru yang absen hari ini.</div>
+  <?php endif; ?>
+  <?php foreach ($guruAbsen['daftar'] as $g): ?>
+    <div class="gv-guru-row">
+      <div class="gg-avatar"><?= strtoupper(substr($g['nama'], 0, 1)) ?></div>
+      <div>
+        <div class="gg-nama"><?= clean($g['nama']) ?></div>
+        <div class="gg-sub"><?= $g['role'] === 'wali_kelas' ? 'Wali Kelas' : 'Guru' ?> ·
+          <?= !empty($g['terlambat']) ? '<span class="text-warning fw-semibold">Terlambat</span>' : '<span class="text-success fw-semibold">Tepat waktu</span>' ?></div>
+      </div>
+      <div class="gg-jam">
+        <?= substr($g['jam_masuk'], 0, 5) ?>
+        <div class="gg-sub"><?= !empty($g['jam_pulang']) ? 'pulang ' . substr($g['jam_pulang'], 0, 5) : 'belum pulang' ?></div>
+      </div>
+    </div>
+  <?php endforeach; ?>
+</div>
+<?php endif; ?>
 <?php endif; ?>
 
 <!-- ===== Statistik ringkas untuk admin/guru/wali_kelas ===== -->

@@ -9,7 +9,7 @@ function navActive($dirOrFile, $currentDir, $currentPage) {
 
 // Dashboard hanya aktif di index.php utama. Sebelumnya semua halaman bernama
 // index.php (nilai/, ujian/, izin/, dst.) ikut menyalakan menu Dashboard.
-$folderModul = ['siswa','kelas','mapel','absensi','lokasi','nilai','rapor','elearning','ujian','pengumuman','users','izin','libur'];
+$folderModul = ['siswa','kelas','mapel','absensi','lokasi','nilai','rapor','elearning','ujian','pengumuman','users','izin','libur','guru'];
 $dashboardAktif = ($currentPage === 'index.php' && !in_array($currentDir, $folderModul, true)) ? 'active' : '';
 
 // Jumlah izin yang menunggu konfirmasi (badge untuk wali kelas & guru).
@@ -53,6 +53,30 @@ $labelMenuIzin = ['siswa' => 'Ajukan Izin', 'wali_kelas' => 'Konfirmasi Izin', '
       <li class="nav-item">
         <a class="nav-link <?= navActive('siswa', $currentDir, $currentPage) ?>" href="<?= BASE_URL ?>/siswa/list.php">
           <i class="bi bi-people-fill"></i>Siswa Kelas Saya
+        </a>
+      </li>
+      <?php endif; ?>
+
+      <?php if (in_array($role, ['admin','kepala_sekolah'])): ?>
+      <li class="nav-item">
+        <a class="nav-link <?= ($currentDir==='guru' && in_array($currentPage, ['list.php','profil.php'])) ? 'active' : '' ?>" href="<?= BASE_URL ?>/guru/list.php">
+          <i class="bi bi-person-vcard-fill"></i>Data Guru
+        </a>
+      </li>
+      <li class="nav-item">
+        <a class="nav-link <?= ($currentDir==='guru' && $currentPage==='jadwal.php') ? 'active' : '' ?>" href="<?= BASE_URL ?>/guru/jadwal.php">
+          <i class="bi bi-calendar-week-fill"></i>Jadwal Mengajar
+        </a>
+      </li>
+      <?php elseif (in_array($role, ['guru','wali_kelas'])): ?>
+      <li class="nav-item">
+        <a class="nav-link <?= ($currentDir==='guru' && $currentPage==='profil.php') ? 'active' : '' ?>" href="<?= BASE_URL ?>/guru/profil.php">
+          <i class="bi bi-person-vcard-fill"></i>Biodata Saya
+        </a>
+      </li>
+      <li class="nav-item">
+        <a class="nav-link <?= ($currentDir==='guru' && $currentPage==='jadwal.php') ? 'active' : '' ?>" href="<?= BASE_URL ?>/guru/jadwal.php">
+          <i class="bi bi-calendar-week-fill"></i>Jadwal Mengajar
         </a>
       </li>
       <?php endif; ?>

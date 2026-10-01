@@ -34,12 +34,12 @@ $hariIni = date('Y-m-d');
 
 /* ================= Cek migrasi ================= */
 try {
-    $pdo->query("SELECT 1 FROM absensi_guru LIMIT 1");
-    $pdo->query("SELECT 1 FROM pengaturan_absen_guru LIMIT 1");
+    $pdo->query("SELECT jam_jadwal, terlambat_menit FROM absensi_guru LIMIT 1");
+    $pdo->query("SELECT toleransi_menit FROM pengaturan_absen_guru LIMIT 1");
 } catch (PDOException $e) {
     include __DIR__ . '/../includes/header.php';
     echo "<div class='card p-4'><h5 class='fw-bold'><i class='bi bi-exclamation-triangle text-warning me-2'></i>Absen Guru belum aktif</h5>"
-       . "<p class='mb-0'>Import file <b>guru_tambah.sql</b> ke database <b>db_absensi_sekolah</b> melalui phpMyAdmin, lalu refresh halaman ini.</p></div>";
+       . "<p class='mb-0'>Import file <b>guru_tambah.sql</b> lalu <b>guru_profil_jadwal.sql</b> ke database <b>db_absensi_sekolah</b> melalui phpMyAdmin, lalu refresh halaman ini.</p></div>";
     include __DIR__ . '/../includes/footer.php';
     exit;
 }
@@ -54,6 +54,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['aksi'] ?? '') === 'simpan_
         $errors[] = 'Sesi formulir tidak valid. Muat ulang halaman lalu coba lagi.';
     } else {
         $f = [];
+        $tolIn = $_POST['toleransi_menit'] ?? '';
+        if (!ctype_digit((string)$tolIn) || (int)$tolIn > 120) { $errors[] = 'Toleransi harus berupa angka 0–120 menit.'; }
+        $tolMenit = (int)$tolIn;
         foreach (['jam_masuk_mulai', 'jam_masuk_batas', 'jam_masuk_selesai', 'jam_pulang_mulai', 'jam_pulang_selesai'] as $k) {
             $f[$k] = gmWaktu($_POST[$k] ?? '');
             if ($f[$k] === null) { $errors[] = 'Format jam tidak valid.'; break; }
@@ -72,11 +75,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['aksi'] ?? '') === 'simpan_
         if (!$errors) {
             $row = $pdo->query("SELECT id FROM pengaturan_absen_guru ORDER BY id LIMIT 1")->fetch();
             if ($row) {
-                $stmt = $pdo->prepare("UPDATE pengaturan_absen_guru SET jam_masuk_mulai=?, jam_masuk_batas=?, jam_masuk_selesai=?, jam_pulang_mulai=?, jam_pulang_selesai=? WHERE id=?");
-                $stmt->execute([$f['jam_masuk_mulai'], $f['jam_masuk_batas'], $f['jam_masuk_selesai'], $f['jam_pulang_mulai'], $f['jam_pulang_selesai'], $row['id']]);
+                $stmt = $pdo->prepare("UPDATE pengaturan_absen_guru SET jam_masuk_mulai=?, jam_masuk_batas=?, toleransi_menit=?, jam_masuk_selesai=?, jam_pulang_mulai=?, jam_pulang_selesai=? WHERE id=?");
+                $stmt->execute([$f['jam_masuk_mulai'], $f['jam_masuk_batas'], $tolMenit, $f['jam_masuk_selesai'], $f['jam_pulang_mulai'], $f['jam_pulang_selesai'], $row['id']]);
             } else {
-                $stmt = $pdo->prepare("INSERT INTO pengaturan_absen_guru (jam_masuk_mulai, jam_masuk_batas, jam_masuk_selesai, jam_pulang_mulai, jam_pulang_selesai) VALUES (?,?,?,?,?)");
-                $stmt->execute(array_values($f));
+                $stmt = $pdo->prepare("INSERT INTO pengaturan_absen_guru (jam_masuk_mulai, jam_masuk_batas, toleransi_menit, jam_masuk_selesai, jam_pulang_mulai, jam_pulang_selesai) VALUES (?,?,?,?,?,?)");
+                $stmt->execute([$f['jam_masuk_mulai'], $f['jam_masuk_batas'], $tolMenit, $f['jam_masuk_selesai'], $f['jam_pulang_mulai'], $f['jam_pulang_selesai']]);
             }
             setFlash('success', 'Pengaturan jam absen guru disimpan.');
             redirect('absensi/guru_monitor.php');
@@ -91,7 +94,7 @@ if (!preg_match('/^(\d{4})-(0[1-9]|1[0-2])$/', $bulan, $mb) || (int)$mb[1] < 200
 
 $set = $pdo->query("SELECT * FROM pengaturan_absen_guru ORDER BY id LIMIT 1")->fetch() ?: [
     'jam_masuk_mulai' => '05:30:00', 'jam_masuk_batas' => '07:30:00', 'jam_masuk_selesai' => '10:00:00',
-    'jam_pulang_mulai' => '14:00:00', 'jam_pulang_selesai' => '20:00:00',
+    'jam_pulang_mulai' => '14:00:00', 'jam_pulang_selesai' => '20:00:00', 'toleransi_menit' => 10,
 ];
 
 $pegawai = $pdo->query("SELECT id, nama, role FROM users WHERE role IN ('guru','wali_kelas') ORDER BY nama")->fetchAll();
@@ -185,22 +188,23 @@ include __DIR__ . '/../includes/header.php';
 <div class="card p-3 mb-4">
   <div class="table-responsive">
     <table class="table table-hover align-middle mb-0">
-      <thead class="table-light"><tr><th>#</th><th>Nama</th><th>Peran</th><th>Masuk</th><th>Pulang</th><th>Jarak</th><th>Status</th></tr></thead>
+      <thead class="table-light"><tr><th>#</th><th>Nama</th><th>Peran</th><th>Jadwal Pertama</th><th>Masuk</th><th>Pulang</th><th>Jarak</th><th>Status</th></tr></thead>
       <tbody>
         <?php if (empty($pegawai)): ?>
-          <tr><td colspan="7" class="text-center text-muted py-4">Belum ada akun guru / wali kelas.</td></tr>
+          <tr><td colspan="8" class="text-center text-muted py-4">Belum ada akun guru / wali kelas.</td></tr>
         <?php endif; ?>
         <?php foreach ($pegawai as $i => $p): $a = $absenHarian[$p['id']] ?? null; $hadir = $a && !empty($a['jam_masuk']); ?>
           <tr>
             <td><?= $i + 1 ?></td>
             <td class="fw-semibold"><?= clean($p['nama']) ?></td>
             <td class="text-muted small"><?= clean($labelRole[$p['role']] ?? $p['role']) ?></td>
+            <td class="small text-muted"><?= ($a && !empty($a['jam_jadwal'])) ? substr($a['jam_jadwal'], 0, 5) : '-' ?></td>
             <td><?= $hadir ? substr($a['jam_masuk'], 0, 5) : '-' ?></td>
             <td><?= ($a && !empty($a['jam_pulang'])) ? substr($a['jam_pulang'], 0, 5) : '-' ?></td>
             <td class="small text-muted"><?= $hadir ? (int)$a['jarak_masuk'] . ' m' : '-' ?></td>
             <td>
               <?php if ($hadir): ?>
-                <?= !empty($a['terlambat']) ? '<span class="badge bg-warning text-dark">Terlambat</span>' : '<span class="badge bg-success">Tepat waktu</span>' ?>
+                <?= !empty($a['terlambat']) ? '<span class="badge bg-warning text-dark">Terlambat ' . (int)$a['terlambat_menit'] . ' mnt</span>' : '<span class="badge bg-success">Tepat waktu</span>' ?>
               <?php elseif ($infoLiburTgl['libur']): ?>
                 <span class="badge bg-secondary">Libur</span>
               <?php elseif ($tanggal > $hariIni): ?>
@@ -267,13 +271,14 @@ include __DIR__ . '/../includes/header.php';
     <input type="hidden" name="aksi" value="simpan_pengaturan">
     <div class="row g-3">
       <div class="col-6 col-md"><label class="form-label small">Masuk dibuka</label><input type="time" name="jam_masuk_mulai" class="form-control" value="<?= substr($set['jam_masuk_mulai'], 0, 5) ?>" <?= $bisaAtur ? 'required' : 'disabled' ?>></div>
-      <div class="col-6 col-md"><label class="form-label small">Batas tepat waktu</label><input type="time" name="jam_masuk_batas" class="form-control" value="<?= substr($set['jam_masuk_batas'], 0, 5) ?>" <?= $bisaAtur ? 'required' : 'disabled' ?>></div>
+      <div class="col-6 col-md"><label class="form-label small">Batas tepat waktu <span class="text-muted">(tanpa jadwal)</span></label><input type="time" name="jam_masuk_batas" class="form-control" value="<?= substr($set['jam_masuk_batas'], 0, 5) ?>" <?= $bisaAtur ? 'required' : 'disabled' ?>></div>
+      <div class="col-6 col-md"><label class="form-label small">Toleransi (menit)</label><input type="number" name="toleransi_menit" min="0" max="120" class="form-control" value="<?= (int)($set['toleransi_menit'] ?? 10) ?>" <?= $bisaAtur ? 'required' : 'disabled' ?>></div>
       <div class="col-6 col-md"><label class="form-label small">Masuk ditutup</label><input type="time" name="jam_masuk_selesai" class="form-control" value="<?= substr($set['jam_masuk_selesai'], 0, 5) ?>" <?= $bisaAtur ? 'required' : 'disabled' ?>></div>
       <div class="col-6 col-md"><label class="form-label small">Pulang dibuka</label><input type="time" name="jam_pulang_mulai" class="form-control" value="<?= substr($set['jam_pulang_mulai'], 0, 5) ?>" <?= $bisaAtur ? 'required' : 'disabled' ?>></div>
       <div class="col-6 col-md"><label class="form-label small">Pulang ditutup</label><input type="time" name="jam_pulang_selesai" class="form-control" value="<?= substr($set['jam_pulang_selesai'], 0, 5) ?>" <?= $bisaAtur ? 'required' : 'disabled' ?>></div>
     </div>
     <?php if ($bisaAtur): ?><button class="btn btn-primary mt-3"><i class="bi bi-save"></i> Simpan Pengaturan</button><?php endif; ?>
-    <div class="form-text mt-2">Lokasi dan radius absen memakai pengaturan di menu Lokasi &amp; Radius GPS (sama dengan absen siswa).</div>
+    <div class="form-text mt-2">Jam standar ini hanya dipakai pada hari <b>tanpa jadwal mengajar</b>. Bila guru punya jadwal, batas tepat waktu = jam pelajaran pertama + toleransi, dan absen pulang dibuka setelah pelajaran terakhir selesai. Lokasi dan radius memakai menu Lokasi &amp; Radius GPS.</div>
   </form>
 </div>
 

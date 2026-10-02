@@ -14,11 +14,26 @@ requireRole(['siswa']);
 $pageTitle = 'Absen GPS';
 $user = currentUser();
 
+// Ubah total menit menjadi teks: 45 -> "45 menit", 75 -> "1 jam 15 menit"
+function teksKeterlambatan(int $menit): string {
+    if ($menit < 60) return $menit . ' menit';
+    $j = intdiv($menit, 60);
+    $m = $menit % 60;
+    return $j . ' jam' . ($m > 0 ? ' ' . $m . ' menit' : '');
+}
+
 $stmtSiswa = $pdo->prepare("SELECT s.*, k.nama_kelas FROM siswa s LEFT JOIN kelas k ON s.kelas_id = k.id WHERE s.id = ?");
 $stmtSiswa->execute([$user['siswa_id']]);
 $siswa = $stmtSiswa->fetch();
 
 $lokasi = $pdo->query("SELECT * FROM lokasi_sekolah ORDER BY id DESC LIMIT 1")->fetch();
+
+// Absen masuk setelah jam_selesai TETAP DITERIMA (dicatat terlambat) sampai jam pulang dibuka.
+// Setelah itu absen masuk ditutup (siswa harus diinput manual oleh guru/admin).
+$batasAkhirMasuk = null;
+if ($lokasi) {
+    $batasAkhirMasuk = ($lokasi['jam_pulang_mulai'] > $lokasi['jam_selesai']) ? $lokasi['jam_pulang_mulai'] : '23:59:59';
+}
 
 $hariIni = date('Y-m-d');
 $stmtAbsenHariIni = $pdo->prepare("SELECT * FROM absensi WHERE siswa_id = ? AND tanggal = ?");
@@ -27,6 +42,16 @@ $absenHariIni = $stmtAbsenHariIni->fetch();
 
 $sudahMasuk  = $absenHariIni && $absenHariIni['status'] === 'Hadir';
 $sudahPulang = $absenHariIni && !empty($absenHariIni['jam_pulang']);
+
+// Menit terlambat yang sudah tercatat hari ini (kolom terlambat_menit; cadangan: baca dari keterangan)
+$terlambatSaya = 0;
+if ($absenHariIni) {
+    if (isset($absenHariIni['terlambat_menit'])) {
+        $terlambatSaya = (int)$absenHariIni['terlambat_menit'];
+    } elseif (preg_match('/terlambat (\d+) menit/i', (string)($absenHariIni['keterangan'] ?? ''), $mm)) {
+        $terlambatSaya = (int)$mm[1];
+    }
+}
 
 $infoLibur = cekHariLibur($pdo, $hariIni);
 
@@ -39,6 +64,19 @@ if ($infoLibur['libur'] && !$sudahMasuk) {
     $tahap = 'pulang';
 } else {
     $tahap = 'selesai';
+}
+
+// Peringatan di halaman bila jam masuk sudah lewat (masih bisa absen, tetapi terlambat) atau sudah ditutup
+$infoTelatSekarang = null;
+if ($tahap === 'masuk' && $lokasi) {
+    $sekarang = date('H:i:s');
+    if ($sekarang > $lokasi['jam_selesai']) {
+        if ($sekarang <= $batasAkhirMasuk) {
+            $infoTelatSekarang = ['status' => 'telat', 'menit' => (int)ceil((strtotime($sekarang) - strtotime($lokasi['jam_selesai'])) / 60)];
+        } else {
+            $infoTelatSekarang = ['status' => 'tutup'];
+        }
+    }
 }
 
 // ==== Proses absen (dipanggil via fetch AJAX) ====
@@ -92,22 +130,37 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['aksi']) && $_POST['ak
     $jamSekarang = date('H:i:s');
 
     if ($tipe === 'Masuk') {
-        $jamBuka  = $lokasi['jam_mulai'];
-        $jamTutup = $lokasi['jam_selesai'];
+        $jamBuka       = $lokasi['jam_mulai'];
+        $jamTutup      = $lokasi['jam_selesai'];      // batas tepat waktu
+        $jamBatasAkhir = $batasAkhirMasuk;            // batas terlambat yang masih diterima
     } else {
-        $jamBuka  = $lokasi['jam_pulang_mulai'];
-        $jamTutup = $lokasi['jam_pulang_selesai'];
+        $jamBuka       = $lokasi['jam_pulang_mulai'];
+        $jamTutup      = $lokasi['jam_pulang_selesai'];
+        $jamBatasAkhir = $jamTutup;
     }
 
     $dalamRadius = $jarak <= $lokasi['radius_meter'];
-    $dalamJam = ($jamSekarang >= $jamBuka) && ($jamSekarang <= $jamTutup);
+    $dalamJam = ($jamSekarang >= $jamBuka) && ($jamSekarang <= $jamBatasAkhir);
+
+    // Hitung keterlambatan (hanya absen masuk, hanya jika lewat batas tepat waktu)
+    $terlambatMenit = 0;
+    if ($tipe === 'Masuk' && $jamSekarang > $jamTutup) {
+        $terlambatMenit = (int)ceil((strtotime($jamSekarang) - strtotime($jamTutup)) / 60);
+    }
 
     $status = 'Ditolak';
     $alasan = null;
+    $jamTampil = substr($jamSekarang, 0, 5);
     if (!$dalamJam) {
-        $jamTampil = substr($jamSekarang, 0, 5);
-        $labelTahap = $tipe === 'Masuk' ? 'absen masuk' : 'absen pulang';
-        $alasan = "Di luar jam {$labelTahap}. Sekarang pukul {$jamTampil}, jam dibuka " . substr($jamBuka,0,5) . '–' . substr($jamTutup,0,5);
+        if ($tipe === 'Masuk') {
+            if ($jamSekarang < $jamBuka) {
+                $alasan = "Absen masuk belum dibuka. Sekarang pukul {$jamTampil}, dibuka mulai " . substr($jamBuka, 0, 5) . '.';
+            } else {
+                $alasan = "Absen masuk sudah ditutup (batas pukul " . substr($jamBatasAkhir, 0, 5) . "). Sekarang pukul {$jamTampil}. Hubungi guru/wali kelas untuk diinput manual.";
+            }
+        } else {
+            $alasan = "Di luar jam absen pulang. Sekarang pukul {$jamTampil}, jam dibuka " . substr($jamBuka,0,5) . '–' . substr($jamTutup,0,5);
+        }
     } elseif (!$dalamRadius) {
         $alasan = "Di luar radius sekolah (jarak {$jarak}m, maksimal {$lokasi['radius_meter']}m)";
     } else {
@@ -120,15 +173,35 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['aksi']) && $_POST['ak
         VALUES (?,?,?,?,?,?,?,?,?,?,?)
     ");
     $stmt->execute([$user['siswa_id'], $siswa['kelas_id'], $tipe, $hariIni, $jamSekarang, $lat, $lng, $jarak, $akurasi, $status, $alasan]);
+    $gpsLogId = (int)$pdo->lastInsertId();
 
     if ($status === 'Berhasil' && $tipe === 'Masuk') {
+        $keterangan = 'Absen mandiri via GPS' . ($terlambatMenit > 0 ? " — terlambat {$terlambatMenit} menit" : '');
         $stmt = $pdo->prepare("
             INSERT INTO absensi (siswa_id, kelas_id, tanggal, status, keterangan, input_oleh)
-            VALUES (?,?,?, 'Hadir', 'Absen mandiri via GPS', 'Sistem GPS')
-            ON DUPLICATE KEY UPDATE status='Hadir', keterangan='Absen mandiri via GPS', input_oleh='Sistem GPS'
+            VALUES (?,?,?, 'Hadir', ?, 'Sistem GPS')
+            ON DUPLICATE KEY UPDATE status='Hadir', keterangan=VALUES(keterangan), input_oleh='Sistem GPS'
         ");
-        $stmt->execute([$user['siswa_id'], $siswa['kelas_id'], $hariIni]);
-        echo json_encode(['ok' => true, 'tipe' => 'Masuk', 'pesan' => "Absen masuk berhasil! Jarak Anda {$jarak} meter dari sekolah.", 'jam' => date('H:i'), 'jarak' => $jarak]);
+        $stmt->execute([$user['siswa_id'], $siswa['kelas_id'], $hariIni, $keterangan]);
+
+        // Simpan menit terlambat ke kolom khusus. Dibungkus try-catch supaya absen tetap berhasil
+        // walaupun migrasi_terlambat.sql belum dijalankan (info tetap ada di kolom keterangan).
+        try {
+            $pdo->prepare("UPDATE absensi SET terlambat_menit = ? WHERE siswa_id = ? AND tanggal = ?")
+                ->execute([$terlambatMenit, $user['siswa_id'], $hariIni]);
+            $pdo->prepare("UPDATE absensi_gps SET terlambat_menit = ? WHERE id = ?")
+                ->execute([$terlambatMenit, $gpsLogId]);
+        } catch (PDOException $e) {
+            // kolom terlambat_menit belum ada
+        }
+
+        $pesan = $terlambatMenit > 0
+            ? "Absen masuk berhasil, tetapi Anda terlambat " . teksKeterlambatan($terlambatMenit) . ". Jarak Anda {$jarak} meter dari sekolah."
+            : "Absen masuk berhasil! Jarak Anda {$jarak} meter dari sekolah.";
+        echo json_encode([
+            'ok' => true, 'tipe' => 'Masuk', 'pesan' => $pesan, 'jam' => date('H:i'), 'jarak' => $jarak,
+            'terlambat' => $terlambatMenit, 'terlambat_teks' => $terlambatMenit > 0 ? teksKeterlambatan($terlambatMenit) : '',
+        ]);
     } elseif ($status === 'Berhasil' && $tipe === 'Pulang') {
         // Jaga-jaga kalau baris absensi hari ini belum ada (harusnya sudah ada karena tipe Pulang
         // hanya tercapai setelah absen masuk), pakai INSERT ... ON DUPLICATE KEY agar tidak fatal error.
@@ -173,6 +246,7 @@ $bentukLog = function ($r) {
     ] : null;
 };
 $dataLog = ['masuk' => $bentukLog($logMasuk), 'pulang' => $bentukLog($logPulang)];
+if ($dataLog['masuk']) { $dataLog['masuk']['terlambat'] = $terlambatSaya; }
 
 include __DIR__ . '/../includes/header.php';
 ?>
@@ -180,8 +254,10 @@ include __DIR__ . '/../includes/header.php';
 <style>
 .absen-dot{ width:30px; height:30px; border-radius:50%; color:#fff; font-weight:800; font-size:.8rem; display:flex; align-items:center; justify-content:center; flex-shrink:0; }
 .absen-dot.masuk{ background:#16A34A; }
+.absen-dot.telat{ background:#D97706; }
 .absen-dot.pulang{ background:#EA7A1B; }
 .absen-dot.kosong{ background:#CBD5E1; }
+.telat-teks{ color:#B45309; font-weight:700; }
 </style>
 
 <h4 class="fw-bold mb-3"><i class="bi bi-geo-alt-fill me-2"></i>Absen Kehadiran (GPS)</h4>
@@ -203,6 +279,22 @@ include __DIR__ . '/../includes/header.php';
     <p class="mb-0 text-muted"><?= clean($infoLibur['keterangan']) ?> — tidak ada absen hari ini. Selamat beristirahat!</p>
   </div>
 <?php else: ?>
+
+<?php if ($infoTelatSekarang && $infoTelatSekarang['status'] === 'telat'): ?>
+  <div id="alertTelat" class="alert alert-warning d-flex align-items-start gap-2 small">
+    <i class="bi bi-alarm-fill mt-1"></i>
+    <div>
+      Batas absen masuk (<strong><?= substr($lokasi['jam_selesai'], 0, 5) ?></strong>) sudah lewat.
+      Anda <strong>masih bisa absen sampai pukul <?= substr($batasAkhirMasuk, 0, 5) ?></strong>, tetapi akan tercatat
+      <strong>terlambat</strong> (saat ini <?= teksKeterlambatan($infoTelatSekarang['menit']) ?>).
+    </div>
+  </div>
+<?php elseif ($infoTelatSekarang && $infoTelatSekarang['status'] === 'tutup'): ?>
+  <div id="alertTelat" class="alert alert-danger d-flex align-items-start gap-2 small">
+    <i class="bi bi-x-octagon-fill mt-1"></i>
+    <div>Absen masuk sudah ditutup (batas pukul <strong><?= substr($batasAkhirMasuk, 0, 5) ?></strong>). Hubungi guru atau wali kelas untuk diinput manual.</div>
+  </div>
+<?php endif; ?>
 
 <div class="row g-4">
   <div class="col-lg-5">
@@ -257,7 +349,7 @@ include __DIR__ . '/../includes/header.php';
       <h6 class="fw-bold small mb-2"><i class="bi bi-clock-history me-1"></i>Catatan Absen Hari Ini</h6>
 
       <div class="d-flex align-items-center gap-3 py-2 border-bottom">
-        <span class="absen-dot <?= $sudahMasuk ? 'masuk' : 'kosong' ?>" id="dotMasuk">M</span>
+        <span class="absen-dot <?= $sudahMasuk ? ($terlambatSaya > 0 ? 'telat' : 'masuk') : 'kosong' ?>" id="dotMasuk">M</span>
         <div class="flex-grow-1">
           <div class="fw-semibold small">Absen Masuk</div>
           <div class="small text-muted" id="infoMasuk">Belum absen</div>
@@ -279,7 +371,7 @@ include __DIR__ . '/../includes/header.php';
       <h6 class="fw-bold small mb-2"><i class="bi bi-info-circle me-1"></i>Ketentuan Absen GPS</h6>
       <ul class="small text-muted mb-0 ps-3">
         <li>Absen hanya berhasil jika Anda berada dalam radius <strong><?= (int)$lokasi['radius_meter'] ?> meter</strong> dari sekolah.</li>
-        <li>Jam absen masuk pukul <strong><?= substr($lokasi['jam_mulai'],0,5) ?></strong> s/d <strong><?= substr($lokasi['jam_selesai'],0,5) ?></strong>.</li>
+        <li>Jam absen masuk pukul <strong><?= substr($lokasi['jam_mulai'],0,5) ?></strong> s/d <strong><?= substr($lokasi['jam_selesai'],0,5) ?></strong>. Lewat dari jam itu Anda <strong>masih bisa absen sampai pukul <?= substr($batasAkhirMasuk,0,5) ?></strong>, tetapi tercatat <strong>terlambat</strong> beserta lama keterlambatannya.</li>
         <li>Jam absen pulang pukul <strong><?= substr($lokasi['jam_pulang_mulai'],0,5) ?></strong> s/d <strong><?= substr($lokasi['jam_pulang_selesai'],0,5) ?></strong> (waktu server: <strong><?= date('H:i') ?></strong> sekarang).</li>
         <li>Absen pulang hanya bisa dilakukan setelah absen masuk berhasil.</li>
         <li>Aktifkan izin lokasi (GPS) pada browser HP Anda.</li>
@@ -320,9 +412,17 @@ L.circle([schoolLat, schoolLng], { radius: radius, color: '#0D9488', fillOpacity
 // ---- Catatan absen hari ini: data dari server ----
 const logAbsen = <?= json_encode($dataLog) ?>;
 const masukManual = <?= json_encode($masukManual) ?>;
+const terlambatManual = <?= (int)$terlambatSaya ?>;
 let posisiSaya = null;
 const markerAbsen = {};
 const namaAbsen = { masuk: 'Absen Masuk', pulang: 'Absen Pulang' };
+
+// 75 -> "1 jam 15 menit", 45 -> "45 menit"
+function teksTelat(m) {
+  if (m < 60) return m + ' menit';
+  const j = Math.floor(m / 60), s = m % 60;
+  return j + ' jam' + (s > 0 ? ' ' + s + ' menit' : '');
+}
 
 function ikonAbsen(huruf, warna) {
   return L.divIcon({
@@ -336,9 +436,10 @@ function pasangMarkerAbsen(kunci) {
   const d = logAbsen[kunci];
   if (!d) return;
   if (markerAbsen[kunci]) map.removeLayer(markerAbsen[kunci]);
+  const telat = (kunci === 'masuk' && d.terlambat > 0) ? '<br><strong style="color:#B45309;">Terlambat ' + teksTelat(d.terlambat) + '</strong>' : '';
   markerAbsen[kunci] = L.marker([d.lat, d.lng], {
-    icon: ikonAbsen(kunci === 'masuk' ? 'M' : 'P', kunci === 'masuk' ? '#16A34A' : '#EA7A1B')
-  }).addTo(map).bindPopup('<strong>' + namaAbsen[kunci] + '</strong><br>Pukul ' + d.jam + '<br>' + d.jarak + ' m dari sekolah');
+    icon: ikonAbsen(kunci === 'masuk' ? 'M' : 'P', kunci === 'masuk' ? (d.terlambat > 0 ? '#D97706' : '#16A34A') : '#EA7A1B')
+  }).addTo(map).bindPopup('<strong>' + namaAbsen[kunci] + '</strong><br>Pukul ' + d.jam + '<br>' + d.jarak + ' m dari sekolah' + telat);
 }
 
 function tampilkanInfoAbsen(kunci) {
@@ -349,11 +450,27 @@ function tampilkanInfoAbsen(kunci) {
   const d = logAbsen[kunci];
   if (d) {
     info.textContent = 'Pukul ' + d.jam + ' \u00B7 ' + d.jarak + ' m dari sekolah';
-    dot.className = 'absen-dot ' + kunci;
+    if (kunci === 'masuk' && d.terlambat > 0) {
+      const t = document.createElement('div');
+      t.className = 'telat-teks';
+      t.textContent = 'Terlambat ' + teksTelat(d.terlambat);
+      info.appendChild(t);
+      dot.className = 'absen-dot telat';
+    } else {
+      dot.className = 'absen-dot ' + kunci;
+    }
     btn.classList.remove('d-none');
   } else if (kunci === 'masuk' && masukManual) {
     info.textContent = 'Tercatat hadir (diinput guru/admin, tanpa data lokasi)';
-    dot.className = 'absen-dot masuk';
+    if (terlambatManual > 0) {
+      const t = document.createElement('div');
+      t.className = 'telat-teks';
+      t.textContent = 'Terlambat ' + teksTelat(terlambatManual);
+      info.appendChild(t);
+      dot.className = 'absen-dot telat';
+    } else {
+      dot.className = 'absen-dot masuk';
+    }
   }
 }
 
@@ -369,7 +486,7 @@ function catatAbsenBerhasil(data, pos) {
   const kunci = data.tipe === 'Masuk' ? 'masuk' : 'pulang';
   const jarak = (data.jarak !== undefined) ? data.jarak
     : haversine(schoolLat, schoolLng, pos.coords.latitude, pos.coords.longitude);
-  logAbsen[kunci] = { lat: pos.coords.latitude, lng: pos.coords.longitude, jam: data.jam, jarak: Math.round(jarak) };
+  logAbsen[kunci] = { lat: pos.coords.latitude, lng: pos.coords.longitude, jam: data.jam, jarak: Math.round(jarak), terlambat: data.terlambat || 0 };
   pasangMarkerAbsen(kunci);
   tampilkanInfoAbsen(kunci);
   fitSemua();
@@ -454,7 +571,10 @@ document.getElementById('btnAbsen')?.addEventListener('click', function () {
             btn.disabled = false;
             btn.querySelector('i').className = 'bi bi-box-arrow-right';
             label.textContent = 'Absen Pulang';
-            statusText.textContent = 'Absen masuk tercatat pukul ' + data.jam + '. Nanti tekan tombol lagi untuk absen pulang.';
+            statusText.textContent = data.terlambat > 0
+              ? 'Absen masuk tercatat pukul ' + data.jam + ' (terlambat ' + data.terlambat_teks + '). Nanti tekan tombol lagi untuk absen pulang.'
+              : 'Absen masuk tercatat pukul ' + data.jam + '. Nanti tekan tombol lagi untuk absen pulang.';
+            document.getElementById('alertTelat')?.remove();
           } else {
             // Absen pulang selesai -> semua tahap tuntas
             tahapSaatIni = 'selesai';

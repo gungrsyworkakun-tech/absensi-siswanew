@@ -33,7 +33,7 @@ function gpNull($v) { return $v === '' ? null : $v; }
 /* ================= Cek migrasi ================= */
 try {
     $pdo->query("SELECT 1 FROM guru_profil LIMIT 1");
-    $pdo->query("SELECT 1 FROM jadwal_mengajar LIMIT 1");
+    $pdo->query("SELECT semester, tahun_ajaran, berlaku_mulai, berlaku_sampai FROM jadwal_mengajar LIMIT 1");
 } catch (PDOException $e) {
     include __DIR__ . '/../includes/header.php';
     echo "<div class='card p-4'><h5 class='fw-bold'><i class='bi bi-exclamation-triangle text-warning me-2'></i>Fitur Biodata Guru belum aktif</h5>"
@@ -145,14 +145,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 /* ================= Jadwal ringkas guru ini ================= */
 $namaHari = [1 => 'Senin', 2 => 'Selasa', 3 => 'Rabu', 4 => 'Kamis', 5 => 'Jumat'];
 $stmt = $pdo->prepare("
-    SELECT j.hari, j.jam_mulai, j.jam_selesai, m.nama_mapel, k.nama_kelas
+    SELECT j.hari, j.jam_mulai, j.jam_selesai, j.berlaku_mulai, j.berlaku_sampai, m.nama_mapel, k.nama_kelas
     FROM jadwal_mengajar j
     JOIN mata_pelajaran m ON j.mapel_id = m.id
     JOIN kelas k ON j.kelas_id = k.id
-    WHERE j.guru_id = ?
+    WHERE j.guru_id = ? AND j.semester = ? AND j.tahun_ajaran = ?
     ORDER BY j.hari, j.jam_mulai
 ");
-$stmt->execute([$target['id']]);
+$awalPeriode = (int)date('n') >= 7 ? (int)date('Y') : (int)date('Y') - 1;
+$stmt->execute([$target['id'], (int)date('n') >= 7 ? 'Ganjil' : 'Genap', $awalPeriode . '/' . ($awalPeriode + 1)]);
 $jadwal = $stmt->fetchAll();
 $mapelDiampu = [];
 foreach ($jadwal as $j) { $mapelDiampu[$j['nama_mapel']] = true; }
@@ -257,7 +258,7 @@ include __DIR__ . '/../includes/header.php';
     </div>
     <div class="card p-3">
       <div class="d-flex justify-content-between align-items-center mb-2">
-        <h6 class="fw-bold mb-0"><i class="bi bi-calendar-week-fill me-1"></i>Jadwal Mengajar</h6>
+        <h6 class="fw-bold mb-0"><i class="bi bi-calendar-week-fill me-1"></i>Jadwal Mengajar <span class="text-muted fw-normal small">(periode berjalan)</span></h6>
         <a href="jadwal.php<?= $pemantau ? '?guru_id=' . (int)$target['id'] : '' ?>" class="small">Detail</a>
       </div>
       <?php if (empty($jadwal)): ?><div class="text-muted small">Belum ada jadwal.</div><?php endif; ?>
@@ -265,7 +266,14 @@ include __DIR__ . '/../includes/header.php';
         <div class="gp-jadwal-row">
           <div class="h"><?= $namaHari[$j['hari']] ?? '-' ?></div>
           <div><?= substr($j['jam_mulai'], 0, 5) ?>–<?= substr($j['jam_selesai'], 0, 5) ?><br>
-            <span class="text-muted"><?= clean($j['nama_mapel']) ?> · <?= clean($j['nama_kelas']) ?></span></div>
+            <span class="text-muted"><?= clean($j['nama_mapel']) ?> · <?= clean($j['nama_kelas']) ?></span>
+            <?php if ($j['berlaku_mulai'] || $j['berlaku_sampai']): ?>
+              <br><span class="badge bg-info-subtle text-info-emphasis border">
+                <?= ($j['berlaku_mulai'] && $j['berlaku_mulai'] === $j['berlaku_sampai'])
+                    ? 'Sekali, ' . date('d/m/Y', strtotime($j['berlaku_mulai']))
+                    : ($j['berlaku_mulai'] ? date('d/m/Y', strtotime($j['berlaku_mulai'])) : 'awal periode') . ' – ' . ($j['berlaku_sampai'] ? date('d/m/Y', strtotime($j['berlaku_sampai'])) : 'akhir periode') ?>
+              </span>
+            <?php endif; ?></div>
         </div>
       <?php endforeach; ?>
     </div>

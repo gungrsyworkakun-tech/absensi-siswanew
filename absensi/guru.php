@@ -1,99 +1,308 @@
 <?php
-// Daftar guru & wali kelas beserta biodata ringkas dan mata pelajaran yang diampu.
-// Untuk admin dan kepala sekolah.
+// Absen GPS untuk guru & wali kelas (masuk + pulang).
+// Lokasi & radius memakai tabel lokasi_sekolah (sama dengan absen siswa);
+// jam buka/tutup & batas terlambat memakai tabel pengaturan_absen_guru.
 date_default_timezone_set('Asia/Makassar');
 
 require_once __DIR__ . '/../includes/auth.php';
+require_once __DIR__ . '/../includes/libur.php';
 
 $user = currentUser();
-$pageTitle = 'Data Guru';
-requireRole(['admin', 'kepala_sekolah']);
+$pageTitle = 'Absen Guru';
+requireRole(['guru', 'wali_kelas']);
 
+if (session_status() !== PHP_SESSION_ACTIVE) { session_start(); }
+
+/* ================= Helper ================= */
+function agCsrfToken() {
+    if (empty($_SESSION['ag_csrf'])) { $_SESSION['ag_csrf'] = bin2hex(random_bytes(16)); }
+    return $_SESSION['ag_csrf'];
+}
+function agCsrfValid($t) {
+    return !empty($_SESSION['ag_csrf']) && is_string($t) && hash_equals($_SESSION['ag_csrf'], $t);
+}
+function agJarakMeter($lat1, $lon1, $lat2, $lon2) {
+    $r = 6371000;
+    $p1 = deg2rad($lat1); $p2 = deg2rad($lat2);
+    $dp = deg2rad($lat2 - $lat1); $dl = deg2rad($lon2 - $lon1);
+    $a = sin($dp / 2) ** 2 + cos($p1) * cos($p2) * sin($dl / 2) ** 2;
+    return 2 * $r * asin(min(1, sqrt($a)));
+}
+// Periode berjalan (Ganjil = Jul–Des, Genap = Jan–Jun) — sama dengan guru/jadwal.php
+function agSemesterSekarang() { return (int)date('n') >= 7 ? 'Ganjil' : 'Genap'; }
+function agTahunAjaranSekarang() {
+    $awal = (int)date('n') >= 7 ? (int)date('Y') : (int)date('Y') - 1;
+    return $awal . '/' . ($awal + 1);
+}
+function agJson($arr) {
+    header('Content-Type: application/json; charset=utf-8');
+    echo json_encode($arr);
+    exit;
+}
+
+$hariIni = date('Y-m-d');
+$sekarang = date('H:i:s');
+$adaPost = ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['aksi'] ?? '') === 'absen');
+
+/* ================= Cek migrasi ================= */
+$tabelAda = true;
 try {
-    $pdo->query("SELECT 1 FROM guru_profil LIMIT 1");
-    $pdo->query("SELECT 1 FROM jadwal_mengajar LIMIT 1");
+    $pdo->query("SELECT jam_jadwal, terlambat_menit FROM absensi_guru LIMIT 1");
+    $pdo->query("SELECT toleransi_menit FROM pengaturan_absen_guru LIMIT 1");
+    $pdo->query("SELECT semester, tahun_ajaran, berlaku_mulai, berlaku_sampai FROM jadwal_mengajar LIMIT 1");
 } catch (PDOException $e) {
+    $tabelAda = false;
+}
+if (!$tabelAda) {
+    if ($adaPost) { agJson(['ok' => false, 'pesan' => 'Fitur absen guru belum aktif. Hubungi admin untuk menjalankan guru_tambah.sql dan guru_profil_jadwal.sql.']); }
     include __DIR__ . '/../includes/header.php';
-    echo "<div class='card p-4'><h5 class='fw-bold'><i class='bi bi-exclamation-triangle text-warning me-2'></i>Fitur Data Guru belum aktif</h5>"
-       . "<p class='mb-0'>Import file <b>guru_profil_jadwal.sql</b> ke database <b>db_absensi_sekolah</b> melalui phpMyAdmin, lalu refresh halaman ini.</p></div>";
+    echo "<div class='card p-4'><h5 class='fw-bold'><i class='bi bi-exclamation-triangle text-warning me-2'></i>Absen Guru belum aktif</h5>"
+       . "<p class='mb-0'>Import file <b>guru_tambah.sql</b> lalu <b>guru_profil_jadwal.sql</b> ke database <b>db_absensi_sekolah</b> melalui phpMyAdmin, lalu refresh halaman ini.</p></div>";
     include __DIR__ . '/../includes/footer.php';
     exit;
 }
 
-$q = trim($_GET['q'] ?? '');
+/* ================= Pengaturan & lokasi ================= */
+$set = $pdo->query("SELECT * FROM pengaturan_absen_guru ORDER BY id LIMIT 1")->fetch() ?: [
+    'jam_masuk_mulai' => '05:30:00', 'jam_masuk_batas' => '07:30:00', 'jam_masuk_selesai' => '10:00:00',
+    'jam_pulang_mulai' => '14:00:00', 'jam_pulang_selesai' => '20:00:00', 'toleransi_menit' => 10,
+];
+$lokasi = $pdo->query("SELECT * FROM lokasi_sekolah WHERE aktif = 1 ORDER BY id DESC LIMIT 1")->fetch();
+$infoLibur = cekHariLibur($pdo, $hariIni);
 
-$sql = "
-    SELECT u.id, u.nama, u.role, p.nip, p.jabatan, p.no_hp, p.status_kepegawaian, p.id AS profil_id,
-           GROUP_CONCAT(DISTINCT m.nama_mapel ORDER BY m.nama_mapel SEPARATOR ', ') AS mapel,
-           COUNT(DISTINCT j.id) AS jml_jadwal
-    FROM users u
-    LEFT JOIN guru_profil p ON p.user_id = u.id
-    LEFT JOIN jadwal_mengajar j ON j.guru_id = u.id
-    LEFT JOIN mata_pelajaran m ON m.id = j.mapel_id
-    WHERE u.role IN ('guru', 'wali_kelas')";
-$params = [];
-if ($q !== '') {
-    $sql .= " AND (u.nama LIKE ? OR p.nip LIKE ?)";
-    $like = '%' . $q . '%';
-    $params = [$like, $like];
+$stmt = $pdo->prepare("SELECT * FROM absensi_guru WHERE user_id = ? AND tanggal = ?");
+$stmt->execute([$user['id'], $hariIni]);
+$hariIniRow = $stmt->fetch();
+
+/* ---- Jadwal mengajar hari ini -> jam absen efektif ----
+   Dengan jadwal : tepat waktu sampai (jam pelajaran pertama + toleransi); masuk ditutup & pulang dibuka
+                   saat pelajaran terakhir selesai.
+   Tanpa jadwal  : memakai jam standar dari pengaturan_absen_guru. */
+$stmt = $pdo->prepare("
+    SELECT j.jam_mulai, j.jam_selesai, m.nama_mapel, k.nama_kelas
+    FROM jadwal_mengajar j
+    JOIN mata_pelajaran m ON j.mapel_id = m.id
+    JOIN kelas k ON j.kelas_id = k.id
+    WHERE j.guru_id = ? AND j.hari = ? AND j.semester = ? AND j.tahun_ajaran = ?
+      AND (j.berlaku_mulai IS NULL OR j.berlaku_mulai <= ?)
+      AND (j.berlaku_sampai IS NULL OR j.berlaku_sampai >= ?)
+    ORDER BY j.jam_mulai
+");
+$stmt->execute([$user['id'], (int)date('N'), agSemesterSekarang(), agTahunAjaranSekarang(), $hariIni, $hariIni]);
+$jadwalHariIni = $stmt->fetchAll();
+
+$toleransi = (int)($set['toleransi_menit'] ?? 10);
+$jamAcuan = null;                                   // jam pelajaran pertama (null = tidak ada jadwal)
+$masukBuka = $set['jam_masuk_mulai'];
+$batasTepat = $set['jam_masuk_batas'];
+$masukTutup = $set['jam_masuk_selesai'];
+$pulangBuka = $set['jam_pulang_mulai'];
+$pulangTutup = $set['jam_pulang_selesai'];
+
+if ($jadwalHariIni) {
+    $jamAcuan = $jadwalHariIni[0]['jam_mulai'];
+    $akhirTerakhir = '00:00:00';
+    foreach ($jadwalHariIni as $jd) { if ($jd['jam_selesai'] > $akhirTerakhir) { $akhirTerakhir = $jd['jam_selesai']; } }
+    $batasTepat = date('H:i:s', strtotime($hariIni . ' ' . $jamAcuan) + $toleransi * 60);
+    $masukTutup = $akhirTerakhir;
+    $pulangBuka = $akhirTerakhir;
+    if ($pulangTutup < $pulangBuka) { $pulangTutup = $pulangBuka; }
+    if ($masukBuka > $jamAcuan) { $masukBuka = $jamAcuan; }
 }
-$sql .= " GROUP BY u.id, u.nama, u.role, p.nip, p.jabatan, p.no_hp, p.status_kepegawaian, p.id ORDER BY u.nama";
-$stmt = $pdo->prepare($sql);
-$stmt->execute($params);
-$daftar = $stmt->fetchAll();
 
-$labelRole = ['guru' => 'Guru', 'wali_kelas' => 'Wali Kelas'];
-$jmlBelumLengkap = 0;
-foreach ($daftar as $g) { if (!$g['profil_id']) { $jmlBelumLengkap++; } }
+/* ================= Proses absen (AJAX) ================= */
+if ($adaPost) {
+    if (!agCsrfValid($_POST['csrf'] ?? '')) {
+        agJson(['ok' => false, 'pesan' => 'Sesi tidak valid. Muat ulang halaman lalu coba lagi.']);
+    }
+    if ($infoLibur['libur']) {
+        agJson(['ok' => false, 'pesan' => 'Hari ini libur (' . $infoLibur['keterangan'] . '), absen tidak diperlukan.']);
+    }
+    if (!$lokasi) {
+        agJson(['ok' => false, 'pesan' => 'Lokasi sekolah belum diatur. Hubungi admin.']);
+    }
+
+    $lat = $_POST['lat'] ?? null;
+    $lng = $_POST['lng'] ?? null;
+    if (!is_numeric($lat) || !is_numeric($lng) || abs((float)$lat) > 90 || abs((float)$lng) > 180 || ((float)$lat == 0 && (float)$lng == 0)) {
+        agJson(['ok' => false, 'pesan' => 'Koordinat GPS tidak valid. Aktifkan GPS lalu coba lagi.']);
+    }
+    $lat = (float)$lat;
+    $lng = (float)$lng;
+    $akurasi = (int)round((float)($_POST['akurasi'] ?? 0));
+
+    $jarak = (int)round(agJarakMeter($lat, $lng, (float)$lokasi['latitude'], (float)$lokasi['longitude']));
+    $radius = (int)$lokasi['radius_meter'];
+    if ($jarak > $radius) {
+        agJson(['ok' => false, 'pesan' => "Anda berada {$jarak} meter dari sekolah. Absen hanya bisa dalam radius {$radius} meter."]);
+    }
+
+    $jamHM = substr($sekarang, 0, 5);
+
+    // ---- Absen MASUK ----
+    if (!$hariIniRow) {
+        if ($sekarang < $masukBuka || $sekarang > $masukTutup) {
+            agJson(['ok' => false, 'pesan' => 'Di luar jam absen masuk. Sekarang pukul ' . $jamHM . ', dibuka ' . substr($masukBuka, 0, 5) . '–' . substr($masukTutup, 0, 5) . '.']);
+        }
+        $terlambat = ($sekarang > $batasTepat) ? 1 : 0;
+        // Lama terlambat dihitung dari awal pelajaran pertama (atau batas standar bila tidak ada jadwal)
+        $acuanMenit = $jamAcuan ?: $batasTepat;
+        $terlambatMenit = $terlambat ? max(1, (int)floor((strtotime($hariIni . ' ' . $sekarang) - strtotime($hariIni . ' ' . $acuanMenit)) / 60)) : 0;
+        try {
+            $stmt = $pdo->prepare("INSERT INTO absensi_guru (user_id, tanggal, jam_masuk, lat_masuk, lng_masuk, jarak_masuk, akurasi_masuk, terlambat, jam_jadwal, terlambat_menit) VALUES (?,?,?,?,?,?,?,?,?,?)");
+            $stmt->execute([$user['id'], $hariIni, $sekarang, $lat, $lng, $jarak, $akurasi, $terlambat, $jamAcuan, $terlambatMenit]);
+        } catch (PDOException $e) {
+            agJson(['ok' => false, 'pesan' => 'Absen masuk Anda sudah tercatat. Muat ulang halaman.']);
+        }
+        agJson([
+            'ok' => true, 'tipe' => 'Masuk', 'jam' => $jamHM, 'terlambat' => (bool)$terlambat, 'jarak' => $jarak,
+            'pesan' => 'Absen masuk berhasil pukul ' . $jamHM . ($terlambat ? " (terlambat {$terlambatMenit} menit)." : ' (tepat waktu).'),
+        ]);
+    }
+
+    // ---- Absen PULANG ----
+    if (empty($hariIniRow['jam_pulang'])) {
+        if ($sekarang < $pulangBuka || $sekarang > $pulangTutup) {
+            agJson(['ok' => false, 'pesan' => 'Di luar jam absen pulang. Sekarang pukul ' . $jamHM . ', dibuka ' . substr($pulangBuka, 0, 5) . '–' . substr($pulangTutup, 0, 5) . ($jamAcuan ? ' (setelah pelajaran terakhir selesai).' : '.')]);
+        }
+        $stmt = $pdo->prepare("UPDATE absensi_guru SET jam_pulang = ?, lat_pulang = ?, lng_pulang = ?, jarak_pulang = ? WHERE id = ? AND jam_pulang IS NULL");
+        $stmt->execute([$sekarang, $lat, $lng, $jarak, $hariIniRow['id']]);
+        agJson(['ok' => true, 'tipe' => 'Pulang', 'jam' => $jamHM, 'jarak' => $jarak, 'pesan' => 'Absen pulang berhasil pukul ' . $jamHM . '.']);
+    }
+
+    agJson(['ok' => false, 'pesan' => 'Anda sudah absen masuk dan pulang hari ini.']);
+}
+
+/* ================= Data tampilan ================= */
+$bulanIni = date('Y-m');
+$awalBulan = $bulanIni . '-01';
+$akhirBulan = date('Y-m-t');
+$stmt = $pdo->prepare("SELECT * FROM absensi_guru WHERE user_id = ? AND tanggal BETWEEN ? AND ? ORDER BY tanggal DESC");
+$stmt->execute([$user['id'], $awalBulan, $akhirBulan]);
+$riwayat = $stmt->fetchAll();
+
+$jmlHadir = 0; $jmlTerlambat = 0;
+foreach ($riwayat as $r) {
+    if (!empty($r['jam_masuk'])) { $jmlHadir++; }
+    if (!empty($r['terlambat'])) { $jmlTerlambat++; }
+}
+
+$sudahMasuk  = $hariIniRow && !empty($hariIniRow['jam_masuk']);
+$sudahPulang = $hariIniRow && !empty($hariIniRow['jam_pulang']);
+
+if ($infoLibur['libur'])      { $tombolTeks = 'Hari ini libur'; $tombolAktif = false; }
+elseif ($sudahPulang)         { $tombolTeks = 'Absen hari ini selesai'; $tombolAktif = false; }
+elseif ($sudahMasuk)          { $tombolTeks = 'Absen Pulang'; $tombolAktif = true; }
+else                          { $tombolTeks = 'Absen Masuk'; $tombolAktif = true; }
+
+$namaBulanIndo = [1=>'Januari','Februari','Maret','April','Mei','Juni','Juli','Agustus','September','Oktober','November','Desember'];
+$csrf = agCsrfToken();
 
 include __DIR__ . '/../includes/header.php';
 ?>
 
-<div class="d-flex justify-content-between align-items-center flex-wrap gap-2 mb-3">
-  <h4 class="fw-bold mb-0"><i class="bi bi-person-vcard-fill me-2"></i>Data Guru</h4>
-  <a href="jadwal.php" class="btn btn-outline-dark btn-sm"><i class="bi bi-calendar-week-fill"></i> Jadwal Mengajar</a>
-</div>
+<style>
+.ag-card{ background:#fff; border:1px solid #E5E7EE; border-radius:12px; padding:16px 18px; height:100%; display:flex; align-items:center; gap:14px; }
+.ag-card.done{ border-left:4px solid #16A34A; }
+.ag-card.pending{ border-left:4px solid #EA7A1B; background:linear-gradient(90deg,#FDEEE0,#fff 40%); }
+.ag-card .ag-icon{ width:44px; height:44px; border-radius:10px; background:#EDEFF5; color:#131A2E; display:flex; align-items:center; justify-content:center; font-size:1.2rem; flex-shrink:0; }
+.ag-card.done .ag-icon{ background:#E7F6EC; color:#16A34A; }
+.ag-card.pending .ag-icon{ background:#FDEEE0; color:#EA7A1B; }
+.ag-label{ font-size:.68rem; font-weight:800; letter-spacing:.06em; text-transform:uppercase; color:#6B7280; }
+.ag-time{ font-size:1.5rem; font-weight:800; color:#1C2233; line-height:1.15; }
+.ag-note{ font-size:.76rem; color:#6B7280; }
+.ag-btn{ width:100%; padding:14px 18px; font-weight:800; font-size:1rem; border-radius:12px; }
+.ag-info{ background:#EAF2FE; color:#1E3A6E; border-radius:8px; padding:10px 16px; font-size:.8rem; }
+.ag-info.ok{ background:#E7F6EC; color:#0F5A2A; }
+.ag-info.err{ background:#FCEAEA; color:#8A1B1B; }
+</style>
 
-<?php if ($jmlBelumLengkap > 0): ?>
-  <div class="alert alert-warning small"><i class="bi bi-exclamation-triangle-fill me-1"></i><b><?= $jmlBelumLengkap ?></b> guru belum melengkapi biodata.</div>
+<h4 class="fw-bold mb-3"><i class="bi bi-geo-alt-fill me-2"></i>Absen Guru</h4>
+
+<?php if ($infoLibur['libur']): ?>
+  <div class="ag-info mb-3"><i class="bi bi-calendar-x-fill me-1"></i><b>Hari ini libur</b> — <?= clean($infoLibur['keterangan']) ?>.</div>
 <?php endif; ?>
 
-<div class="card p-3 mb-3">
-  <form method="GET" class="row g-2">
-    <div class="col-md-6">
-      <input type="text" name="q" class="form-control" placeholder="Cari nama atau NIP..." value="<?= clean($q) ?>">
-    </div>
-    <div class="col-auto"><button class="btn btn-primary"><i class="bi bi-search"></i> Cari</button></div>
-    <?php if ($q !== ''): ?><div class="col-auto"><a href="list.php" class="btn btn-outline-secondary">Reset</a></div><?php endif; ?>
-  </form>
+<div class="ag-info mb-3">
+  <i class="bi bi-info-circle-fill me-1"></i>
+  <?php if ($jamAcuan): ?>
+    Pelajaran pertama Anda hari ini mulai <b><?= substr($jamAcuan, 0, 5) ?></b> — absen masuk <b>tepat waktu sampai <?= substr($batasTepat, 0, 5) ?></b>
+    (toleransi <?= $toleransi ?> menit). Absen pulang dibuka <b><?= substr($pulangBuka, 0, 5) ?>–<?= substr($pulangTutup, 0, 5) ?></b> (setelah pelajaran terakhir selesai).
+  <?php else: ?>
+    Tidak ada jadwal mengajar hari ini, berlaku jam standar: masuk dibuka <b><?= substr($masukBuka, 0, 5) ?>–<?= substr($masukTutup, 0, 5) ?></b>
+    (tepat waktu sampai <b><?= substr($batasTepat, 0, 5) ?></b>) · pulang dibuka <b><?= substr($pulangBuka, 0, 5) ?>–<?= substr($pulangTutup, 0, 5) ?></b>.
+  <?php endif; ?>
+  <?php if ($lokasi): ?>Absen hanya berhasil dalam radius <b><?= (int)$lokasi['radius_meter'] ?> meter</b> dari sekolah.<?php else: ?><b>Lokasi sekolah belum diatur.</b><?php endif; ?>
 </div>
 
+<div class="row g-3 mb-3">
+  <div class="col-md-6">
+    <div class="ag-card <?= $sudahMasuk ? 'done' : 'pending' ?>">
+      <div class="ag-icon"><i class="bi bi-box-arrow-in-right"></i></div>
+      <div>
+        <div class="ag-label">Absen Masuk</div>
+        <div class="ag-time"><?= $sudahMasuk ? substr($hariIniRow['jam_masuk'], 0, 5) : '— Belum absen' ?></div>
+        <div class="ag-note">
+          <?php if ($sudahMasuk): ?>
+            <?= !empty($hariIniRow['terlambat']) ? '<span class="text-warning fw-semibold">Terlambat ' . (int)$hariIniRow['terlambat_menit'] . ' menit</span>' : '<span class="text-success fw-semibold">Tepat waktu</span>' ?>
+            · <?= (int)$hariIniRow['jarak_masuk'] ?> m dari sekolah
+          <?php else: ?>Belum ada absen masuk hari ini<?php endif; ?>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="col-md-6">
+    <div class="ag-card <?= $sudahPulang ? 'done' : 'pending' ?>">
+      <div class="ag-icon"><i class="bi bi-box-arrow-right"></i></div>
+      <div>
+        <div class="ag-label">Absen Pulang</div>
+        <div class="ag-time"><?= $sudahPulang ? substr($hariIniRow['jam_pulang'], 0, 5) : '— Belum absen' ?></div>
+        <div class="ag-note"><?= $sudahPulang ? (int)$hariIniRow['jarak_pulang'] . ' m dari sekolah' : ($sudahMasuk ? 'Absen pulang saat jam pulang dibuka' : 'Absen masuk terlebih dahulu') ?></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<?php if ($jadwalHariIni): ?>
+<div class="card p-3 mb-3">
+  <div class="ag-label mb-2"><i class="bi bi-calendar-week-fill me-1"></i>Jadwal Mengajar Hari Ini</div>
+  <?php foreach ($jadwalHariIni as $jd): ?>
+    <div class="d-flex gap-3 py-1 small border-top">
+      <div class="fw-bold text-nowrap"><?= substr($jd['jam_mulai'], 0, 5) ?>–<?= substr($jd['jam_selesai'], 0, 5) ?></div>
+      <div><?= clean($jd['nama_mapel']) ?> <span class="text-muted">· <?= clean($jd['nama_kelas']) ?></span></div>
+    </div>
+  <?php endforeach; ?>
+</div>
+<?php endif; ?>
+
+<button type="button" id="btnAbsenGuru" class="btn btn-dark ag-btn" style="background:#131A2E;border:none;" <?= $tombolAktif ? '' : 'disabled' ?>>
+  <i class="bi bi-geo-alt-fill"></i> <span><?= clean($tombolTeks) ?></span>
+</button>
+<div id="agPesan" class="ag-info mt-3 d-none" role="status" aria-live="polite"></div>
+
+<div class="d-flex gap-2 flex-wrap mt-4 mb-2">
+  <span class="badge bg-success-subtle text-success-emphasis border">Hadir bulan ini: <b><?= $jmlHadir ?></b> hari</span>
+  <span class="badge bg-warning-subtle text-warning-emphasis border">Terlambat: <b><?= $jmlTerlambat ?></b> hari</span>
+</div>
+
+<h5 class="fw-bold mt-3 mb-3"><i class="bi bi-clock-history me-2"></i>Riwayat <?= clean($namaBulanIndo[(int)date('n')] . ' ' . date('Y')) ?></h5>
 <div class="card p-3">
   <div class="table-responsive">
     <table class="table table-hover align-middle mb-0">
-      <thead class="table-light">
-        <tr><th>#</th><th>Nama</th><th>NIP</th><th>Jabatan</th><th>Mapel Diampu</th><th class="text-center">Jam / Minggu</th><th>No. HP</th><th></th></tr>
-      </thead>
+      <thead class="table-light"><tr><th>Tanggal</th><th>Masuk</th><th>Pulang</th><th>Status</th></tr></thead>
       <tbody>
-        <?php if (empty($daftar)): ?>
-          <tr><td colspan="8" class="text-center text-muted py-4">Tidak ada data guru.</td></tr>
+        <?php if (empty($riwayat)): ?>
+          <tr><td colspan="4" class="text-center text-muted py-4">Belum ada data absen bulan ini.</td></tr>
         <?php endif; ?>
-        <?php foreach ($daftar as $i => $g): ?>
+        <?php foreach ($riwayat as $r): ?>
           <tr>
-            <td><?= $i + 1 ?></td>
+            <td><?= clean(formatTanggalIndo($r['tanggal'])) ?></td>
+            <td><?= $r['jam_masuk'] ? substr($r['jam_masuk'], 0, 5) : '-' ?></td>
+            <td><?= $r['jam_pulang'] ? substr($r['jam_pulang'], 0, 5) : '-' ?></td>
             <td>
-              <div class="fw-semibold"><?= clean($g['nama']) ?></div>
-              <div class="small text-muted"><?= clean($labelRole[$g['role']] ?? $g['role']) ?><?= $g['status_kepegawaian'] ? ' · ' . clean($g['status_kepegawaian']) : '' ?></div>
-            </td>
-            <td><?= $g['nip'] ? clean($g['nip']) : '<span class="text-muted">-</span>' ?></td>
-            <td><?= $g['jabatan'] ? clean($g['jabatan']) : '<span class="text-muted">-</span>' ?></td>
-            <td class="small"><?= $g['mapel'] ? clean($g['mapel']) : '<span class="text-muted">Belum ada jadwal</span>' ?></td>
-            <td class="text-center"><?= (int)$g['jml_jadwal'] ?></td>
-            <td class="small"><?= $g['no_hp'] ? clean($g['no_hp']) : '<span class="text-muted">-</span>' ?></td>
-            <td class="text-nowrap">
-              <?php if (!$g['profil_id']): ?><span class="badge bg-warning text-dark me-1">Belum diisi</span><?php endif; ?>
-              <a href="profil.php?user_id=<?= (int)$g['id'] ?>" class="btn btn-sm btn-outline-primary"><i class="bi bi-person-vcard"></i> Biodata</a>
-              <a href="jadwal.php?guru_id=<?= (int)$g['id'] ?>" class="btn btn-sm btn-outline-secondary"><i class="bi bi-calendar-week"></i> Jadwal</a>
+              <?php if (!empty($r['terlambat'])): ?><span class="badge bg-warning text-dark">Terlambat <?= (int)$r['terlambat_menit'] ?> mnt</span>
+              <?php else: ?><span class="badge bg-success">Tepat waktu</span><?php endif; ?>
+              <?php if (empty($r['jam_pulang']) && $r['tanggal'] < $hariIni): ?><span class="badge bg-secondary">Tanpa absen pulang</span><?php endif; ?>
             </td>
           </tr>
         <?php endforeach; ?>
@@ -101,5 +310,67 @@ include __DIR__ . '/../includes/header.php';
     </table>
   </div>
 </div>
+
+<script>
+(function () {
+  const btn = document.getElementById('btnAbsenGuru');
+  const pesanEl = document.getElementById('agPesan');
+  if (!btn) return;
+  const URL_ABSEN = window.location.pathname;
+  const CSRF = <?= json_encode($csrf) ?>;
+  let sibuk = false;
+
+  function tampil(teks, jenis) {
+    pesanEl.className = 'ag-info mt-3 ' + (jenis || '');
+    pesanEl.textContent = teks; // textContent: pesan server tidak diperlakukan sebagai HTML
+  }
+
+  btn.addEventListener('click', function () {
+    if (sibuk || btn.disabled) return;
+    if (!navigator.geolocation) { tampil('Browser Anda tidak mendukung GPS.', 'err'); return; }
+    sibuk = true;
+    const label = btn.querySelector('span');
+    const teksAsal = label.textContent;
+    btn.disabled = true;
+    label.textContent = 'Mencari lokasi...';
+    tampil('Mengambil lokasi GPS Anda...', '');
+
+    function pulih() { sibuk = false; btn.disabled = false; label.textContent = teksAsal; }
+
+    navigator.geolocation.getCurrentPosition(function (pos) {
+      label.textContent = 'Mengirim...';
+      const fd = new FormData();
+      fd.append('aksi', 'absen');
+      fd.append('csrf', CSRF);
+      fd.append('lat', pos.coords.latitude);
+      fd.append('lng', pos.coords.longitude);
+      fd.append('akurasi', pos.coords.accuracy || 0);
+
+      fetch(URL_ABSEN, { method: 'POST', body: fd, credentials: 'same-origin' })
+        .then(function (r) { return r.text(); })
+        .then(function (text) {
+          let data;
+          try { data = JSON.parse(text); }
+          catch (e) { throw new Error('Respons server tidak valid. Muat ulang halaman lalu coba lagi.'); }
+          if (data.ok) {
+            tampil(data.pesan, 'ok');
+            label.textContent = 'Berhasil';
+            setTimeout(function () { window.location.reload(); }, 1200);
+          } else {
+            pulih();
+            tampil(data.pesan || 'Absen gagal.', 'err');
+          }
+        })
+        .catch(function (err) {
+          pulih();
+          tampil(err.message || 'Terjadi kesalahan jaringan. Coba lagi.', 'err');
+        });
+    }, function () {
+      pulih();
+      tampil('Gagal mengambil lokasi. Aktifkan GPS dan izinkan akses lokasi untuk situs ini.', 'err');
+    }, { enableHighAccuracy: true, timeout: 15000 });
+  });
+})();
+</script>
 
 <?php include __DIR__ . '/../includes/footer.php'; ?>

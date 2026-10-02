@@ -11,7 +11,7 @@ requireRole(['admin', 'kepala_sekolah']);
 
 try {
     $pdo->query("SELECT 1 FROM guru_profil LIMIT 1");
-    $pdo->query("SELECT 1 FROM jadwal_mengajar LIMIT 1");
+    $pdo->query("SELECT semester, tahun_ajaran FROM jadwal_mengajar LIMIT 1");
 } catch (PDOException $e) {
     include __DIR__ . '/../includes/header.php';
     echo "<div class='card p-4'><h5 class='fw-bold'><i class='bi bi-exclamation-triangle text-warning me-2'></i>Fitur Data Guru belum aktif</h5>"
@@ -28,14 +28,16 @@ $sql = "
            COUNT(DISTINCT j.id) AS jml_jadwal
     FROM users u
     LEFT JOIN guru_profil p ON p.user_id = u.id
-    LEFT JOIN jadwal_mengajar j ON j.guru_id = u.id
+    LEFT JOIN jadwal_mengajar j ON j.guru_id = u.id AND j.semester = ? AND j.tahun_ajaran = ?
     LEFT JOIN mata_pelajaran m ON m.id = j.mapel_id
     WHERE u.role IN ('guru', 'wali_kelas')";
-$params = [];
+$awalPeriode = (int)date('n') >= 7 ? (int)date('Y') : (int)date('Y') - 1;
+$params = [(int)date('n') >= 7 ? 'Ganjil' : 'Genap', $awalPeriode . '/' . ($awalPeriode + 1)];   // periode berjalan
 if ($q !== '') {
     $sql .= " AND (u.nama LIKE ? OR p.nip LIKE ?)";
     $like = '%' . $q . '%';
-    $params = [$like, $like];
+    $params[] = $like;
+    $params[] = $like;
 }
 $sql .= " GROUP BY u.id, u.nama, u.role, p.nip, p.jabatan, p.no_hp, p.status_kepegawaian, p.id ORDER BY u.nama";
 $stmt = $pdo->prepare($sql);
@@ -72,7 +74,7 @@ include __DIR__ . '/../includes/header.php';
   <div class="table-responsive">
     <table class="table table-hover align-middle mb-0">
       <thead class="table-light">
-        <tr><th>#</th><th>Nama</th><th>NIP</th><th>Jabatan</th><th>Mapel Diampu</th><th class="text-center">Jam / Minggu</th><th>No. HP</th><th></th></tr>
+        <tr><th>#</th><th>Nama</th><th>NIP</th><th>Jabatan</th><th>Mapel Diampu</th><th class="text-center">Jadwal (periode ini)</th><th>No. HP</th><th></th></tr>
       </thead>
       <tbody>
         <?php if (empty($daftar)): ?>

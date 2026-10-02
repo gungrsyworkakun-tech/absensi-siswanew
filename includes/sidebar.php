@@ -9,7 +9,7 @@ function navActive($dirOrFile, $currentDir, $currentPage) {
 
 // Dashboard hanya aktif di index.php utama. Sebelumnya semua halaman bernama
 // index.php (nilai/, ujian/, izin/, dst.) ikut menyalakan menu Dashboard.
-$folderModul = ['siswa','kelas','mapel','absensi','lokasi','nilai','rapor','elearning','ujian','pengumuman','users','izin','libur','guru'];
+$folderModul = ['siswa','kelas','mapel','absensi','lokasi','nilai','rapor','elearning','ujian','pengumuman','users','izin','libur','guru','token'];
 $dashboardAktif = ($currentPage === 'index.php' && !in_array($currentDir, $folderModul, true)) ? 'active' : '';
 
 // Jumlah izin yang menunggu konfirmasi (badge untuk wali kelas & guru).
@@ -211,6 +211,11 @@ $labelMenuIzin = ['siswa' => 'Ajukan Izin', 'wali_kelas' => 'Konfirmasi Izin', '
       <li class="nav-item">
         <a class="nav-link <?= navActive('users', $currentDir, $currentPage) ?>" href="<?= BASE_URL ?>/users/list.php">
           <i class="bi bi-person-gear"></i>Kelola Akun
+        </a>
+      </li>
+      <li class="nav-item">
+        <a class="nav-link <?= navActive('token', $currentDir, $currentPage) ?>" href="<?= BASE_URL ?>/token/list.php">
+          <i class="bi bi-key-fill"></i>Token Registrasi
         </a>
       </li>
       <?php endif; ?>
